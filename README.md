@@ -2,6 +2,8 @@
 
 Live terminal and browser pipeline runner, NDJSON v3 event protocol, and standalone offline HTML report generator in Rust.
 
+![Kat0 Web Regression — live and offline pipeline viewer](docs/demo-panel.png)
+
 ## Workspace layout
 
 This workspace contains seven crates sharing a single `Cargo.lock` and producing a single CLI binary (`kat0-pipeline`):
