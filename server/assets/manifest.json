@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "total_bytes": 571539,
+  "assets": [
+    {
+      "file": "panel.js",
+      "bytes": 19552,
+      "sha256": "bb7e07d8eedc0a073dc1deaddd5f3c7cbea2201ab1be592ff6dc853c1de9d2e9"
+    },
+    {
+      "file": "panel.wasm",
+      "bytes": 545498,
+      "sha256": "e0337f5b72d4ad63d5e4b576292c43ab7b30d88bca0a8f954be1661b077e023d"
+    },
+    {
+      "file": "report.css",
+      "bytes": 6489,
+      "sha256": "c98113c0ecaa9f67e20868596bc6685ba2ca7e65fa45d8f2fe7099dc1eb9fe12"
+    }
+  ]
+}

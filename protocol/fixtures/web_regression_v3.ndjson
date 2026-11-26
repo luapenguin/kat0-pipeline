@@ -1,0 +1,38 @@
+{"type":"run_started","schema_version":3,"workers":1,"definition":{"title":"Web regression","description":"Representative NDJSON v3 event stream covering nested cases, dynamic steps, assertion failure, cleanup, and reporting.","columns":[{"title":"Prepare","jobs":[{"id":"prepare-env","title":"Test env","is_test":false,"dependencies":[],"steps":[{"id":"start-fixture","title":"Start isolated web server and database"},{"id":"launch-firefox","title":"Launch pinned Firefox"}]}]},{"title":"Regression","jobs":[{"id":"functionality","title":"Functionality","is_test":true,"dependencies":["prepare-env"],"steps":[],"cases":[{"id":"users-teams","title":"Create user and assign to team with reload persistence","steps":[]}]},{"id":"errors-recovery","title":"Errors & recovery","is_test":true,"dependencies":["prepare-env"],"steps":[],"cases":[{"id":"dns-races","title":"Controlled DNS write races preserve draft and commit real retries","steps":[]},{"id":"menu-races","title":"Controlled Menu Builder writes keep draft and ignore obsolete responses","steps":[]}]}]},{"title":"Cleanup","jobs":[{"id":"cleanup-env","title":"Clean up","is_test":false,"dependencies":["functionality","errors-recovery"],"steps":[{"id":"stop-firefox","title":"Close Firefox and Playwright driver"},{"id":"stop-fixture","title":"Stop web server and remove disposable database"}]}]},{"title":"Report","jobs":[{"id":"publish-report","title":"Publish","is_test":false,"dependencies":["cleanup-env"],"steps":[{"id":"write-html","title":"Write standalone HTML report"}]}]}]}}
+{"type":"job_started","job_id":"prepare-env","at_ms":0}
+{"type":"step_started","job_id":"prepare-env","step_id":"start-fixture","at_ms":50}
+{"type":"step_finished","job_id":"prepare-env","step_id":"start-fixture","status":"passed","at_ms":1200}
+{"type":"step_started","job_id":"prepare-env","step_id":"launch-firefox","at_ms":1250}
+{"type":"step_finished","job_id":"prepare-env","step_id":"launch-firefox","status":"passed","at_ms":1800}
+{"type":"job_finished","job_id":"prepare-env","status":"passed","at_ms":1850}
+{"type":"job_started","job_id":"functionality","at_ms":1900}
+{"type":"case_started","job_id":"functionality","case_id":"users-teams","at_ms":1950}
+{"type":"step_started","job_id":"functionality","case_id":"users-teams","step_id":"sign-in","title":"Sign in as administrator","at_ms":2000}
+{"type":"step_finished","job_id":"functionality","case_id":"users-teams","step_id":"sign-in","status":"passed","at_ms":2450}
+{"type":"step_started","job_id":"functionality","case_id":"users-teams","step_id":"assign-member","title":"Create user, team and verify membership after reload","at_ms":2500}
+{"type":"step_finished","job_id":"functionality","case_id":"users-teams","step_id":"assign-member","status":"passed","at_ms":3400}
+{"type":"case_finished","job_id":"functionality","case_id":"users-teams","status":"passed","at_ms":3450}
+{"type":"job_finished","job_id":"functionality","status":"passed","at_ms":3500}
+{"type":"job_started","job_id":"errors-recovery","at_ms":3550}
+{"type":"case_started","job_id":"errors-recovery","case_id":"dns-races","at_ms":3600}
+{"type":"step_started","job_id":"errors-recovery","case_id":"dns-races","step_id":"simulate-503","title":"Simulate 503 during DNS write","at_ms":3650}
+{"type":"step_finished","job_id":"errors-recovery","case_id":"dns-races","step_id":"simulate-503","status":"passed","at_ms":4100}
+{"type":"step_started","job_id":"errors-recovery","case_id":"dns-races","step_id":"retry-write","title":"Retry DNS write explicitly and verify persistence","at_ms":4150}
+{"type":"tick","elapsed_ms":4500}
+{"type":"step_finished","job_id":"errors-recovery","case_id":"dns-races","step_id":"retry-write","status":"failed","at_ms":4750,"kind":"assertion"}
+{"type":"step_started","job_id":"errors-recovery","case_id":"dns-races","step_id":"close-context","title":"Close isolated Firefox context","at_ms":4800}
+{"type":"step_finished","job_id":"errors-recovery","case_id":"dns-races","step_id":"close-context","status":"passed","at_ms":4900}
+{"type":"case_finished","job_id":"errors-recovery","case_id":"dns-races","status":"failed","at_ms":4950}
+{"type":"case_finished","job_id":"errors-recovery","case_id":"menu-races","status":"skipped","at_ms":5000}
+{"type":"job_finished","job_id":"errors-recovery","status":"failed","at_ms":5050}
+{"type":"job_started","job_id":"cleanup-env","at_ms":5100}
+{"type":"step_started","job_id":"cleanup-env","step_id":"stop-firefox","at_ms":5150}
+{"type":"step_finished","job_id":"cleanup-env","step_id":"stop-firefox","status":"passed","at_ms":5450}
+{"type":"step_started","job_id":"cleanup-env","step_id":"stop-fixture","at_ms":5500}
+{"type":"step_finished","job_id":"cleanup-env","step_id":"stop-fixture","status":"passed","at_ms":6050}
+{"type":"job_finished","job_id":"cleanup-env","status":"passed","at_ms":6100}
+{"type":"job_started","job_id":"publish-report","at_ms":6150}
+{"type":"step_started","job_id":"publish-report","step_id":"write-html","at_ms":6200}
+{"type":"step_finished","job_id":"publish-report","step_id":"write-html","status":"passed","at_ms":6350}
+{"type":"job_finished","job_id":"publish-report","status":"passed","at_ms":6380}
+{"type":"run_finished","status":"failed","elapsed_ms":6400}
