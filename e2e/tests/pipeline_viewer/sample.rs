@@ -9,7 +9,12 @@ use kat0_pipeline_playwright::playwright_rs::{
 use super::{DESKTOP, TestResult, check_heading, check_metrics, check_run};
 
 pub(super) async fn check(page: &Page) -> TestResult {
-    check_heading(page, "Web regression", "Simulated snapshot. No jobs ran.").await?;
+    check_heading(
+        page,
+        "Kat0 Web Regression",
+        "Simulated snapshot. No jobs ran.",
+    )
+    .await?;
     expect(page.locator("#pipeline-flow"))
         .to_contain_text("The report includes test and cleanup outcomes.")
         .await?;
