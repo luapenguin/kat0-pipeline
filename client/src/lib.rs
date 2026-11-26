@@ -164,15 +164,25 @@ fn JobList(
 }
 
 fn job_details(snapshot: ReadSignal<Snapshot>, job_id: String) -> impl IntoView {
+    let location = snapshot.with_untracked(|run| find_job_location(run.definition(), &job_id));
     let job_id = StoredValue::new(job_id);
-    // Re-render structure only when dynamic cases or steps are appended to this job.
-    let job_def = Memo::new(move |_| {
+    // Track only lightweight structural counts (Copy, zero allocations) so ticks and status
+    // transitions never clone the Job definition or rebuild the DOM.
+    let structure = Memo::new(move |_| {
         snapshot.with(|run| {
-            job_id.with_value(|id| run.definition().jobs().find(|job| job.id == *id).cloned())
+            job_id.with_value(|id| {
+                lookup_job(run.definition(), location, id).map(|job| {
+                    let case_steps: usize = job.cases.iter().map(|case| case.steps.len()).sum();
+                    (job.steps.len(), job.cases.len(), case_steps)
+                })
+            })
         })
     });
     move || {
-        let job = job_def.get()?;
+        structure.track();
+        let job = snapshot.with_untracked(|run| {
+            job_id.with_value(|id| lookup_job(run.definition(), location, id).cloned())
+        })?;
         let has_steps = !job.steps.is_empty();
         let has_cases = !job.cases.is_empty();
         let has_entries = has_steps || has_cases;
@@ -214,4 +224,35 @@ fn job_details(snapshot: ReadSignal<Snapshot>, job_id: String) -> impl IntoView 
             <p class="empty-steps" hidden=has_entries>"No steps recorded."</p>
         })
     }
+}
+
+fn find_job_location(definition: &Definition, job_id: &str) -> Option<(usize, usize)> {
+    definition
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(col_idx, column)| {
+            column
+                .jobs
+                .iter()
+                .position(|job| job.id == job_id)
+                .map(|job_idx| (col_idx, job_idx))
+        })
+}
+
+fn lookup_job<'a>(
+    definition: &'a Definition,
+    location: Option<(usize, usize)>,
+    job_id: &str,
+) -> Option<&'a Job> {
+    if let Some((col_idx, job_idx)) = location
+        && let Some(job) = definition
+            .columns
+            .get(col_idx)
+            .and_then(|column| column.jobs.get(job_idx))
+        && job.id == job_id
+    {
+        return Some(job);
+    }
+    definition.jobs().find(|job| job.id == job_id)
 }

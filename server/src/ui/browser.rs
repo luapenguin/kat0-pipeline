@@ -14,13 +14,14 @@ use crate::{
     bundle::Bundle,
     http::{LocalServer, live_routes},
     ipc::EVENTS_SOCK_ENV,
+    sse::PublishedSnapshot,
 };
 
 pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 /// Owns the loopback Axum/SSE server for `--ui browser` and `--ui both`.
 pub struct BrowserSession {
-    updates: watch::Sender<Arc<Snapshot>>,
+    updates: watch::Sender<PublishedSnapshot>,
     server: LocalServer,
 }
 
@@ -30,7 +31,7 @@ impl BrowserSession {
         bundle: Arc<Bundle>,
         open_browser: bool,
     ) -> io::Result<Self> {
-        let (updates, rx) = watch::channel(initial);
+        let (updates, rx) = watch::channel(PublishedSnapshot::new(initial));
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown))?;
         let url = format!("{}/", server.origin());
         println!("[kat0-pipeline] {url}");
@@ -45,7 +46,7 @@ impl BrowserSession {
     }
 
     pub fn publish(&self, snapshot: Arc<Snapshot>) {
-        let _ = self.updates.send(snapshot);
+        let _ = self.updates.send(PublishedSnapshot::new(snapshot));
     }
 
     pub async fn close(self, grace: Duration) -> io::Result<()> {

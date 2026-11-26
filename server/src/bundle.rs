@@ -38,6 +38,18 @@ impl Bundle {
         Ok(self.render_json(&serde_json::to_string(snapshot)?, live))
     }
 
+    pub(crate) fn render_json(&self, json: &str, live: bool) -> String {
+        // Prevent JSON values from terminating (or changing the parsing of) the script element.
+        let json = json.replace('<', "\\u003c");
+        let mut html = String::with_capacity(self.html.len() + json.len());
+        html.push_str(&self.html[..self.live_at]);
+        html.push_str(if live { "true" } else { "false" });
+        html.push_str(&self.html[self.live_at + "false".len()..self.snapshot_at]);
+        html.push_str(&json);
+        html.push_str(&self.html[self.snapshot_at + SNAPSHOT_SLOT.len()..]);
+        html
+    }
+
     /// Publishes a complete offline report at a new path, without replacing a file.
     pub async fn save(&self, snapshot: &Snapshot, path: &Path) -> RunResult {
         let html = self.render(snapshot, false)?;
@@ -72,18 +84,6 @@ impl Bundle {
             live_at,
             snapshot_at,
         })
-    }
-
-    fn render_json(&self, json: &str, live: bool) -> String {
-        // Prevent JSON values from terminating (or changing the parsing of) the script element.
-        let json = json.replace('<', "\\u003c");
-        let mut html = String::with_capacity(self.html.len() + json.len());
-        html.push_str(&self.html[..self.live_at]);
-        html.push_str(if live { "true" } else { "false" });
-        html.push_str(&self.html[self.live_at + "false".len()..self.snapshot_at]);
-        html.push_str(&json);
-        html.push_str(&self.html[self.snapshot_at + SNAPSHOT_SLOT.len()..]);
-        html
     }
 }
 

@@ -21,7 +21,7 @@ use tokio::{net::TcpListener, runtime::Handle, sync::watch, task::JoinHandle, ti
 
 use crate::{
     bundle::Bundle,
-    sse::{ClientPool, file_events, watch_events},
+    sse::{ClientPool, PublishedSnapshot, spawn_file_poller, watch_events},
     wire,
 };
 
@@ -105,10 +105,10 @@ impl LocalServer {
     }
 }
 
-/// Serves an in-memory live run backed by a `watch` channel with SSE (`/events`) and
-/// fallback `/snapshot`.
+/// Serves an in-memory live run backed by a `watch` channel of pre-serialized snapshots with
+/// SSE (`/events`) and fallback `/snapshot`.
 pub fn live_routes(
-    updates: watch::Receiver<Arc<Snapshot>>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
 ) -> Router {
@@ -126,22 +126,28 @@ pub fn live_routes(
 
 #[derive(Clone)]
 struct LiveState {
-    updates: watch::Receiver<Arc<Snapshot>>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
     clients: ClientPool,
 }
 
 async fn live_panel_page(State(state): State<LiveState>) -> impl IntoResponse {
-    let snapshot = state.updates.borrow().clone();
-    render_panel(&state.bundle, &snapshot)
+    let published = state.updates.borrow().clone();
+    let html = state
+        .bundle
+        .render_json(published.json(), !published.is_terminal());
+    ([(header::CACHE_CONTROL, "no-store")], Html(html))
 }
 
 async fn live_snapshot(State(state): State<LiveState>) -> impl IntoResponse {
-    let snapshot = state.updates.borrow().clone();
+    let published = state.updates.borrow().clone();
     (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(snapshot.as_ref().clone()),
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        published.json().to_owned(),
     )
 }
 
@@ -156,13 +162,17 @@ pub fn file_routes(
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
 ) -> Router {
+    let path: Arc<Path> = path.into();
+    let initial = Arc::new(initial);
+    let updates = spawn_file_poller(Arc::clone(&path), Arc::clone(&initial), shutdown.clone());
     Router::new()
         .route("/", get(file_panel_page))
         .route("/snapshot", get(file_snapshot))
         .route("/events", get(file_sse))
         .with_state(FileState {
-            path: path.into(),
-            initial: Arc::new(initial),
+            path,
+            initial,
+            updates,
             bundle,
             shutdown,
             clients: ClientPool::default(),
@@ -173,6 +183,7 @@ pub fn file_routes(
 struct FileState {
     path: Arc<Path>,
     initial: Arc<Snapshot>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
     clients: ClientPool,
@@ -200,7 +211,7 @@ async fn file_snapshot(State(state): State<FileState>) -> impl IntoResponse {
 }
 
 async fn file_sse(State(state): State<FileState>) -> Response {
-    file_events(state.path, state.initial, state.shutdown, &state.clients)
+    watch_events(state.updates, state.shutdown, &state.clients)
 }
 
 fn render_panel(bundle: &Bundle, snapshot: &Snapshot) -> Response {
@@ -385,9 +396,13 @@ mod tests {
         .unwrap()
     }
 
+    fn published(status: Status, elapsed_ms: u64) -> PublishedSnapshot {
+        PublishedSnapshot::new(Arc::new(minimal_snapshot(status, elapsed_ms)))
+    }
+
     #[tokio::test]
     async fn live_sse_streams_watch_updates_closes_on_terminal_and_serves_late_clients() {
-        let (tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (tx, rx) = watch::channel(published(Status::Running, 100));
         let bundle = Arc::new(Bundle::for_test());
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
 
@@ -407,13 +422,11 @@ mod tests {
         assert_eq!(first["status"], "running");
         assert_eq!(first["elapsed_ms"], 100);
 
-        tx.send(Arc::new(minimal_snapshot(Status::Running, 250)))
-            .unwrap();
+        tx.send(published(Status::Running, 250)).unwrap();
         let second = next_sse_json(&mut stream).await.unwrap();
         assert_eq!(second["elapsed_ms"], 250);
 
-        tx.send(Arc::new(minimal_snapshot(Status::Passed, 400)))
-            .unwrap();
+        tx.send(published(Status::Passed, 400)).unwrap();
         let terminal = next_sse_json(&mut stream).await.unwrap();
         assert_eq!(terminal["status"], "passed");
         assert_eq!(terminal["elapsed_ms"], 400);
@@ -439,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_sse_enforces_client_cap_and_closes_promptly_on_server_shutdown() {
-        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
         let bundle = Arc::new(Bundle::for_test());
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
 
@@ -488,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn watch_events_returns_204_once_shutdown_is_triggered() {
-        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
         let (stop_tx, stop_rx) = watch::channel(true);
         let _keep = stop_tx;
         let response = watch_events(rx, ShutdownSignal(stop_rx), &ClientPool::default());
@@ -686,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn enforces_security_headers_host_validation_and_fetch_metadata() {
-        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
         let bundle = Arc::new(Bundle::for_test());
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
         let host = server.origin().strip_prefix("http://").unwrap();
