@@ -1,0 +1,40 @@
+[package]
+name = "kat0-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Live terminal and browser pipeline runner and standalone HTML report generator"
+keywords = ["pipeline", "testing", "cli", "e2e", "sse"]
+categories = ["command-line-utilities", "development-tools::testing"]
+include = ["Cargo.toml", "LICENSE", "src/**", "assets/**", "fixtures/**"]
+
+[[bin]]
+name = "kat0-pipeline"
+path = "src/main.rs"
+
+[dependencies]
+kat0-pipeline-protocol.workspace = true
+axum = { version = "0.8", default-features = false, features = [
+  "http1",
+  "json",
+  "tokio",
+] }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt",
+  "signal",
+  "sync",
+  "time",
+] }

@@ -1,0 +1,28 @@
+[package]
+name = "kat0-pipeline-reporter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Async NDJSON v3 test reporter and atomic snapshot writer for kat0-pipeline"
+keywords = ["pipeline", "testing", "reporter", "e2e", "tokio"]
+categories = ["development-tools::testing", "asynchronous"]
+include = ["Cargo.toml", "LICENSE", "src/**"]
+
+[dependencies]
+kat0-pipeline-protocol.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "net",
+  "rt",
+  "sync",
+  "time",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

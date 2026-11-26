@@ -1,0 +1,180 @@
+{
+  "schema_version": 2,
+  "snapshot": {
+    "definition": {
+      "title": "Web regression",
+      "description": "Simulated snapshot. No jobs ran. Cleanup waits for navigation evidence and runs even if a test fails. The report includes test and cleanup outcomes.",
+      "columns": [
+        {
+          "title": "Prepare",
+          "jobs": [
+            {
+              "id": "prepare-env",
+              "title": "Test env",
+              "is_test": false,
+              "dependencies": [],
+              "steps": [
+                {"id": "start-environment", "title": "Prepare isolated web server and database"},
+                {"id": "seed-fixtures", "title": "Seed users and organizations"}
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Regression",
+          "jobs": [
+            {
+              "id": "change-role",
+              "title": "Edit role",
+              "is_test": true,
+              "dependencies": ["prepare-env"],
+              "steps": [
+                {"id": "open-user", "title": "Open user details"},
+                {"id": "save-role", "title": "Save role change"},
+                {"id": "check-role", "title": "Check displayed role"}
+              ]
+            },
+            {
+              "id": "sign-in",
+              "title": "Sign in",
+              "is_test": true,
+              "dependencies": ["prepare-env"],
+              "steps": [
+                {"id": "submit-credentials", "title": "Submit valid credentials"},
+                {"id": "check-dashboard", "title": "Check the dashboard"}
+              ]
+            },
+            {
+              "id": "browse-orgs",
+              "title": "Org pages",
+              "is_test": true,
+              "dependencies": ["prepare-env"],
+              "steps": [
+                {"id": "open-list", "title": "Open organization list"},
+                {"id": "check-pagination", "title": "Verify pagination"},
+                {"id": "check-history", "title": "Check back navigation"}
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Checks & evidence",
+          "jobs": [
+            {
+              "id": "role-persistence",
+              "title": "Verify role",
+              "is_test": true,
+              "dependencies": ["change-role"],
+              "steps": [
+                {"id": "reload-user", "title": "Reload user details"},
+                {"id": "check-persistence", "title": "Check persisted role"}
+              ]
+            },
+            {
+              "id": "save-evidence",
+              "title": "Archive",
+              "is_test": false,
+              "dependencies": ["sign-in", "browse-orgs"],
+              "steps": [
+                {"id": "collect-screenshots", "title": "Collect screenshots"},
+                {"id": "archive-logs", "title": "Archive browser logs"}
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Cleanup",
+          "jobs": [
+            {
+              "id": "cleanup-env",
+              "title": "Clean up",
+              "is_test": false,
+              "dependencies": ["role-persistence", "save-evidence"],
+              "steps": [
+                {"id": "stop-server", "title": "Stop isolated web server"},
+                {"id": "remove-postgresql", "title": "Remove disposable PostgreSQL"}
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Report",
+          "jobs": [
+            {
+              "id": "collect-results",
+              "title": "Publish",
+              "is_test": false,
+              "dependencies": ["cleanup-env"],
+              "steps": [
+                {"id": "collect-outcomes", "title": "Collect test and cleanup outcomes"},
+                {"id": "write-summary", "title": "Publish regression summary"}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "status": "running",
+    "elapsed_ms": 48300,
+    "jobs": {
+      "prepare-env": {
+        "row": {"status": "passed", "started_ms": 0, "duration_ms": 10000},
+        "steps": {
+          "start-environment": {"status": "passed", "started_ms": 0, "duration_ms": 6400},
+          "seed-fixtures": {"status": "passed", "started_ms": 6400, "duration_ms": 3600}
+        }
+      },
+      "change-role": {
+        "row": {"status": "failed", "started_ms": 10000, "duration_ms": 21300},
+        "steps": {
+          "open-user": {"status": "passed", "started_ms": 10000, "duration_ms": 6400},
+          "save-role": {"status": "failed", "started_ms": 16400, "duration_ms": 14900},
+          "check-role": {"status": "skipped", "started_ms": null, "duration_ms": null}
+        }
+      },
+      "sign-in": {
+        "row": {"status": "passed", "started_ms": 10000, "duration_ms": 14200},
+        "steps": {
+          "submit-credentials": {"status": "passed", "started_ms": 10000, "duration_ms": 8800},
+          "check-dashboard": {"status": "passed", "started_ms": 18800, "duration_ms": 5400}
+        }
+      },
+      "browse-orgs": {
+        "row": {"status": "running", "started_ms": 40000, "duration_ms": null},
+        "steps": {
+          "open-list": {"status": "passed", "started_ms": 40000, "duration_ms": 1800},
+          "check-pagination": {"status": "running", "started_ms": 41800, "duration_ms": null},
+          "check-history": {"status": "pending", "started_ms": null, "duration_ms": null}
+        }
+      },
+      "role-persistence": {
+        "row": {"status": "skipped", "started_ms": null, "duration_ms": null},
+        "steps": {
+          "reload-user": {"status": "skipped", "started_ms": null, "duration_ms": null},
+          "check-persistence": {"status": "skipped", "started_ms": null, "duration_ms": null}
+        }
+      },
+      "save-evidence": {
+        "row": {"status": "pending", "started_ms": null, "duration_ms": null},
+        "steps": {
+          "collect-screenshots": {"status": "pending", "started_ms": null, "duration_ms": null},
+          "archive-logs": {"status": "pending", "started_ms": null, "duration_ms": null}
+        }
+      },
+      "cleanup-env": {
+        "row": {"status": "pending", "started_ms": null, "duration_ms": null},
+        "steps": {
+          "stop-server": {"status": "pending", "started_ms": null, "duration_ms": null},
+          "remove-postgresql": {"status": "pending", "started_ms": null, "duration_ms": null}
+        }
+      },
+      "collect-results": {
+        "row": {"status": "pending", "started_ms": null, "duration_ms": null},
+        "steps": {
+          "collect-outcomes": {"status": "pending", "started_ms": null, "duration_ms": null},
+          "write-summary": {"status": "pending", "started_ms": null, "duration_ms": null}
+        }
+      }
+    }
+  }
+}

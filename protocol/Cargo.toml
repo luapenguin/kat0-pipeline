@@ -1,0 +1,16 @@
+[package]
+name = "kat0-pipeline-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "I/O-free pipeline graph model, v2 snapshot codec, and NDJSON v3 event reducer for kat0-pipeline"
+keywords = ["pipeline", "testing", "ndjson", "protocol", "e2e"]
+categories = ["development-tools::testing", "encoding"]
+include = ["Cargo.toml", "LICENSE", "src/**", "fixtures/**"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
