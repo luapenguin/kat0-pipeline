@@ -15,6 +15,14 @@ include = ["Cargo.toml", "LICENSE", "src/**", "assets/**", "fixtures/**"]
 name = "kat0-pipeline"
 path = "src/main.rs"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 kat0-pipeline-protocol.workspace = true
 axum = { version = "0.8", default-features = false, features = [

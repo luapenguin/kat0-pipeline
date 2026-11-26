@@ -1,0 +1,277 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify before release
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate_version="$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["version"])
+          ')"
+          expected_tag="v${crate_version}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml workspace version ${crate_version} (expected ${expected_tag})." >&2
+              exit 1
+            fi
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${expected_tag}"
+          fi
+          is_prerelease="false"
+          if [[ "${tag}" == *-* ]]; then
+            is_prerelease="true"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved release tag: ${tag} (prerelease=${is_prerelease})"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (host crates)
+        run: >
+          cargo clippy --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+          -p xtask
+          -p kat0-pipeline-e2e
+          --all-targets -- -D warnings
+
+      - name: Clippy (WASM client)
+        run: >
+          cargo clippy --locked
+          -p kat0-pipeline-client
+          --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: >
+          cargo doc --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          --no-deps
+
+      - name: Unit and doc tests
+        run: >
+          cargo test --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+          -p xtask
+          -p kat0-pipeline-e2e
+
+      - name: Verify embedded panel manifest
+        run: cargo run --locked -p xtask -- verify-panel --manifest-only
+
+      - name: Verify publishable crate manifests include LICENSE and README
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in kat0-pipeline-protocol kat0-pipeline-reporter kat0-pipeline-playwright kat0-pipeline; do
+            files="$(cargo package --list --locked -p "${pkg}")"
+            grep -qx 'LICENSE' <<< "${files}" || { echo "${pkg} is missing LICENSE"; exit 1; }
+            grep -qx 'README.md' <<< "${files}" || { echo "${pkg} is missing README.md"; exit 1; }
+          done
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            bin: kat0-pipeline
+            native_smoke: true
+            cross_aarch64_linux: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            bin: kat0-pipeline
+            native_smoke: false
+            cross_aarch64_linux: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            bin: kat0-pipeline
+            native_smoke: true
+            cross_aarch64_linux: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            bin: kat0-pipeline
+            native_smoke: false
+            cross_aarch64_linux: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            bin: kat0-pipeline.exe
+            native_smoke: true
+            cross_aarch64_linux: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install Linux aarch64 cross-linker
+        if: matrix.cross_aarch64_linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked -p kat0-pipeline --target ${{ matrix.target }}
+
+      - name: Smoke test binary (Unix)
+        if: matrix.native_smoke && runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          "${bin}" --version
+          out_dir="$(mktemp -d)"
+          PIPELINE_REPORT_ROOT="${out_dir}" PIPELINE_NO_OPEN=1 "${bin}" sample
+          find "${out_dir}" -name 'index.html' | grep -q 'index.html'
+
+      - name: Smoke test binary (Windows)
+        if: matrix.native_smoke && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "target\${{ matrix.target }}\release\${{ matrix.bin }}"
+          & $bin --version
+          $outDir = Join-Path $env:RUNNER_TEMP "kat0-smoke"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $env:PIPELINE_REPORT_ROOT = $outDir
+          $env:PIPELINE_NO_OPEN = "1"
+          & $bin sample
+          $html = Get-ChildItem -Path $outDir -Recurse -Filter "index.html"
+          if (-not $html) { throw "sample did not produce index.html" }
+
+      - name: Package release archive (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist out
+          cp "target/${TARGET}/release/${BIN}" "dist/${BIN}"
+          cp LICENSE README.md dist/
+          tar -C dist -czf "out/kat0-pipeline-${TAG}-${TARGET}.tar.gz" "${BIN}" LICENSE README.md
+
+      - name: Package release archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist, out | Out-Null
+          Copy-Item "target\${env:TARGET}\release\${env:BIN}" "dist\${env:BIN}"
+          Copy-Item LICENSE, README.md dist\
+          Compress-Archive -Path "dist\${env:BIN}", "dist\LICENSE", "dist\README.md" -DestinationPath "out\kat0-pipeline-${env:TAG}-${env:TARGET}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [verify, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          LC_ALL=C ls -1 kat0-pipeline-* | xargs sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+          gh release create "${TAG}" release-assets/* \
+            --title "kat0-pipeline ${TAG}" \
+            --generate-notes \
+            "${prerelease_flag[@]}" \
+            --notes "Licensed under \`AGPL-3.0-only\`. Each archive includes the \`LICENSE\` file and corresponds to git tag \`${TAG}\`. Verify downloads with \`sha256sum -c SHA256SUMS.txt\`."
