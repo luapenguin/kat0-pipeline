@@ -1138,7 +1138,7 @@ name = "kat0-pipeline"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "kat0-pipeline-protocol",
  "serde",
