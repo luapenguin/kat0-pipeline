@@ -3,8 +3,8 @@
 //! Async NDJSON v3 event reporter, atomic snapshot persistence, and execution combinators.
 //!
 //! This crate connects test runners (such as `playwright-rs` suites) to a parent pipeline
-//! orchestrator over a private Unix domain socket while preserving full standalone operation
-//! when run directly.
+//! orchestrator over a private local IPC endpoint (Unix domain socket on Unix, local-only
+//! Named Pipe on Windows) while preserving full standalone operation when run directly.
 //!
 //! # Quick Example
 //!
