@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_msrv:
-        description: "Verify MSRV (Rust 1.88) on publishable crates"
+        description: "Verify MSRV (Rust 1.88 core, Rust 1.95 playwright) on publishable crates"
         type: boolean
         default: true
       run_package_check:
@@ -37,7 +37,7 @@ jobs:
     env:
       PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -90,13 +90,11 @@ jobs:
         run: cargo run --locked -p xtask -- verify-panel --manifest-only
 
   msrv:
-    name: MSRV (Rust 1.88)
+    name: MSRV core (Rust 1.88)
     if: inputs.run_msrv
     runs-on: ubuntu-latest
-    env:
-      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@1.88.0
 
@@ -104,20 +102,37 @@ jobs:
         with:
           key: msrv-1.88
 
-      - name: Check and test publishable crates on MSRV
+      - name: Check and test core publishable crates on MSRV 1.88
         run: >
           cargo test --locked
           -p kat0-pipeline-protocol
           -p kat0-pipeline-reporter
-          -p kat0-pipeline-playwright
           -p kat0-pipeline
+
+  msrv-playwright:
+    name: MSRV playwright (Rust 1.95)
+    if: inputs.run_msrv
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.95
+
+      - name: Check and test kat0-pipeline-playwright on MSRV 1.95
+        run: cargo test --locked -p kat0-pipeline-playwright
 
   package-and-install:
     name: Package and clean cargo install
     if: inputs.run_package_check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -169,20 +184,22 @@ jobs:
     if: inputs.run_panel_rebuild
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
+          components: rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: panel-rebuild
 
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
       - name: Install cargo-leptos 0.3.12
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-leptos@0.3.12
+        run: cargo binstall --no-confirm cargo-leptos@0.3.12
 
       - name: Verify reproducible embedded panel assets
         run: cargo run --locked -p xtask -- verify-panel
@@ -194,7 +211,7 @@ jobs:
     env:
       PLAYWRIGHT_DRIVER_CACHE_DIR: ${{ github.workspace }}/.playwright-driver
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -203,13 +220,13 @@ jobs:
           key: e2e-firefox
 
       - name: Cache Playwright driver
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.playwright-driver
           key: ${{ runner.os }}-playwright-driver-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache Playwright Firefox browser
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-firefox-${{ hashFiles('**/Cargo.lock') }}

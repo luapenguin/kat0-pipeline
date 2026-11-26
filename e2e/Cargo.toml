@@ -2,7 +2,7 @@
 name = "kat0-pipeline-e2e"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 publish = false

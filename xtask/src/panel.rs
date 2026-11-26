@@ -123,11 +123,24 @@ pub fn verify(rebuild: bool) -> TaskResult {
         let rebuilt = build_frontend(&root)?;
         let expected = rebuilt.manifest();
         if manifest != expected {
-            return Err(
+            let mut details = String::new();
+            for (staged, actual) in manifest.assets.iter().zip(&expected.assets) {
+                if staged != actual {
+                    details.push_str(&format!(
+                        "\n  {}: manifest={} bytes ({}), actual={} bytes ({})",
+                        staged.file,
+                        staged.bytes,
+                        &staged.sha256[..12],
+                        actual.bytes,
+                        &actual.sha256[..12],
+                    ));
+                }
+            }
+            return Err(format!(
                 "Los assets en server/assets/ no coinciden con la compilación actual de client/. \
-                 Ejecuta `cargo run -p xtask -- build-panel`."
-                    .into(),
-            );
+                 Ejecuta `cargo run -p xtask -- build-panel`.{details}"
+            )
+            .into());
         }
         println!(
             "Verified reproducible panel assets ({} bytes total).",
@@ -223,7 +236,8 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         .to_str()
         .ok_or("El directorio temporal para cargo-leptos debe usar UTF-8")?;
 
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .current_dir(root)
         .args([
             "leptos",
@@ -236,9 +250,16 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         .env("LEPTOS_SITE_PKG_DIR", PKG_DIR)
         .env("LEPTOS_OUTPUT_NAME", OUTPUT_NAME)
         .env("LEPTOS_HASH_FILES", "false")
+        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+        .env("CARGO_PROFILE_RELEASE_LTO", "true")
+        .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "z")
+        .env("CARGO_ENCODED_RUSTFLAGS", reproducible_rustflags(root))
+        .env_remove("RUSTFLAGS")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = command
         .output()
         .map_err(|error| format!("No se pudo ejecutar {BUILD_CMD}: {error}"))?;
 
@@ -250,8 +271,31 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         return Err(format!("{BUILD_CMD} falló ({})", output.status).into());
     }
 
-    let [js, wasm, css] = read_pkg(&site.path().join(PKG_DIR))?;
+    let [js, mut wasm, css] = read_pkg(&site.path().join(PKG_DIR))?;
+    normalize_wasm_split_marker(&mut wasm);
     Ok(BuiltAssets { js, wasm, css })
+}
+
+/// Normalizes the unused `WASM_SPLIT_MARKER_<16-hex>` export suffix emitted by `wasm_split_helpers`
+/// (which hashes the host `CARGO_HOME` via Cargo crate metadata) without altering WASM section sizes.
+fn normalize_wasm_split_marker(wasm: &mut [u8]) {
+    const PREFIX: &[u8] = b"WASM_SPLIT_MARKER_";
+    const HASH_LEN: usize = 16;
+
+    let mut offset = 0;
+    while let Some(pos) = wasm[offset..]
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    {
+        let start = offset + pos + PREFIX.len();
+        let end = start + HASH_LEN;
+        if end <= wasm.len() && wasm[start..end].iter().all(u8::is_ascii_hexdigit) {
+            wasm[start..end].fill(b'0');
+            offset = end;
+        } else {
+            offset = start;
+        }
+    }
 }
 
 fn read_pkg(pkg: &Path) -> TaskResult<[Vec<u8>; 3]> {
@@ -307,11 +351,88 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> TaskResult {
     Ok(())
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask lives under the pipeline workspace root")
         .to_owned()
+}
+
+/// Strips machine-specific workspace, Cargo, and rustup paths from embedded WASM diagnostics
+/// so `xtask verify-panel` stays reproducible across developer machines and CI runners.
+fn reproducible_rustflags(workspace_root: &Path) -> String {
+    let mut flags: Vec<String> = match std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        Ok(existing) if !existing.is_empty() => existing.split('\x1f').map(str::to_owned).collect(),
+        _ => std::env::var("RUSTFLAGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    };
+
+    let mut remaps = vec![(workspace_root.to_path_buf(), "/workspace".to_owned())];
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|dir| dir.join(".cargo")))
+    {
+        remaps.push((cargo_home, "/cargo".to_owned()));
+    }
+    if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|dir| dir.join(".rustup")))
+    {
+        remaps.push((rustup_home, "/rustup".to_owned()));
+    }
+    // Normalize local `rust-src` paths back to `/rustc/<commit-hash>/library` so machines with
+    // `rust-src` installed produce the exact same WASM bytes as minimal CI runners without it.
+    if let (Some(sysroot), Some(commit)) = (rustc_sysroot(), rustc_commit_hash()) {
+        remaps.push((
+            sysroot.join("lib/rustlib/src/rust/library"),
+            format!("/rustc/{commit}/library"),
+        ));
+    }
+
+    for (from, to) in remaps {
+        let canonical = absolute(&from).unwrap_or(from);
+        if let Some(text) = canonical.to_str() {
+            flags.push(format!("--remap-path-prefix={text}={to}"));
+        }
+    }
+    flags.join("\x1f")
+}
+
+fn rustc_sysroot() -> Option<PathBuf> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let trimmed = path.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+fn rustc_commit_hash() -> Option<String> {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash:"))
+        .map(|hash| hash.trim().to_owned())
+        .filter(|hash| !hash.is_empty())
 }
 
 fn server_assets_dir(workspace_root: &Path) -> PathBuf {
@@ -361,5 +482,15 @@ mod tests {
 
         fs::write(dir.path().join(PANEL_CSS), b"body{margin:1}").unwrap();
         assert!(verify_manifest_on_disk(dir.path(), &manifest).is_err());
+    }
+
+    #[test]
+    fn normalizes_unused_wasm_split_marker_hash_in_place() {
+        let mut a = b"\0asm_WASM_SPLIT_MARKER_90a727bbbea312e2version".to_vec();
+        let mut b = b"\0asm_WASM_SPLIT_MARKER_7d0434b8a6d81eceversion".to_vec();
+        normalize_wasm_split_marker(&mut a);
+        normalize_wasm_split_marker(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(a, b"\0asm_WASM_SPLIT_MARKER_0000000000000000version");
     }
 }

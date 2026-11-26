@@ -103,6 +103,9 @@ button { color: inherit; font: inherit; cursor: pointer; }
 .stage-column h2 {
   margin-block-end: var(--heading-gap);
   padding-inline: .875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 1.1875rem;
   font-weight: 650;
   line-height: var(--heading-height);

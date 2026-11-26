@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
-  "total_bytes": 571539,
+  "total_bytes": 376546,
   "assets": [
     {
       "file": "panel.js",
-      "bytes": 19552,
-      "sha256": "bb7e07d8eedc0a073dc1deaddd5f3c7cbea2201ab1be592ff6dc853c1de9d2e9"
+      "bytes": 19294,
+      "sha256": "733688edd3cfe002633478f0292c94d77d932229c59bbca5e2a62a8af2dea11b"
     },
     {
       "file": "panel.wasm",
-      "bytes": 545498,
-      "sha256": "e0337f5b72d4ad63d5e4b576292c43ab7b30d88bca0a8f954be1661b077e023d"
+      "bytes": 350705,
+      "sha256": "04b859480154b877a9f2b1c0f8ed36bbd900a5ba5d34bebe8754eef477ecffb5"
     },
     {
       "file": "report.css",
-      "bytes": 6489,
-      "sha256": "c98113c0ecaa9f67e20868596bc6685ba2ca7e65fa45d8f2fe7099dc1eb9fe12"
+      "bytes": 6547,
+      "sha256": "6b91bb041390eb8747f7622b3b77cd71b3158a2415a0c7fd9a701edc4ad2da03"
     }
   ]
 }
