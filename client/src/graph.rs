@@ -160,11 +160,14 @@ pub(crate) fn pipeline(
     }
 }
 
+const STRAIGHT_EPSILON: f64 = 1.0;
+
 fn connection_path(source: Position, target: Position) -> String {
     let dy = target.y - source.y;
     let radius = ((target.x - source.x) / 2.0).min(dy.abs() / 2.0);
-    if radius <= 0.0 {
-        return rounded_polyline_path(&[source, target], 0.0);
+    if dy.abs() < STRAIGHT_EPSILON || radius <= 0.0 {
+        let aligned_target = Position::new(target.x, source.y);
+        return rounded_polyline_path(&[source, aligned_target], 0.0);
     }
 
     // Fit two quarter circles between the ports and leave a vertical run in the middle.

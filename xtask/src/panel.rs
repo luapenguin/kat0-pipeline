@@ -223,7 +223,8 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         .to_str()
         .ok_or("El directorio temporal para cargo-leptos debe usar UTF-8")?;
 
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .current_dir(root)
         .args([
             "leptos",
@@ -236,9 +237,13 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         .env("LEPTOS_SITE_PKG_DIR", PKG_DIR)
         .env("LEPTOS_OUTPUT_NAME", OUTPUT_NAME)
         .env("LEPTOS_HASH_FILES", "false")
+        .env("CARGO_ENCODED_RUSTFLAGS", reproducible_rustflags(root))
+        .env_remove("RUSTFLAGS")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = command
         .output()
         .map_err(|error| format!("No se pudo ejecutar {BUILD_CMD}: {error}"))?;
 
@@ -312,6 +317,42 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("xtask lives under the pipeline workspace root")
         .to_owned()
+}
+
+/// Strips machine-specific workspace, Cargo, and rustup paths from embedded WASM diagnostics
+/// so `xtask verify-panel` stays reproducible across developer machines and CI runners.
+fn reproducible_rustflags(workspace_root: &Path) -> String {
+    let mut flags: Vec<String> = match std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        Ok(existing) if !existing.is_empty() => existing.split('\x1f').map(str::to_owned).collect(),
+        _ => std::env::var("RUSTFLAGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    };
+
+    let mut remaps = vec![(workspace_root.to_path_buf(), "/workspace")];
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|dir| dir.join(".cargo")))
+    {
+        remaps.push((cargo_home, "/cargo"));
+    }
+    if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|dir| dir.join(".rustup")))
+    {
+        remaps.push((rustup_home, "/rustup"));
+    }
+
+    for (from, to) in remaps {
+        let canonical = absolute(&from).unwrap_or(from);
+        if let Some(text) = canonical.to_str() {
+            flags.push(format!("--remap-path-prefix={text}={to}"));
+        }
+    }
+    flags.join("\x1f")
 }
 
 fn server_assets_dir(workspace_root: &Path) -> PathBuf {
