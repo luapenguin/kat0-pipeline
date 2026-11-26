@@ -271,8 +271,31 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         return Err(format!("{BUILD_CMD} falló ({})", output.status).into());
     }
 
-    let [js, wasm, css] = read_pkg(&site.path().join(PKG_DIR))?;
+    let [js, mut wasm, css] = read_pkg(&site.path().join(PKG_DIR))?;
+    normalize_wasm_split_marker(&mut wasm);
     Ok(BuiltAssets { js, wasm, css })
+}
+
+/// Normalizes the unused `WASM_SPLIT_MARKER_<16-hex>` export suffix emitted by `wasm_split_helpers`
+/// (which hashes the host `CARGO_HOME` via Cargo crate metadata) without altering WASM section sizes.
+fn normalize_wasm_split_marker(wasm: &mut [u8]) {
+    const PREFIX: &[u8] = b"WASM_SPLIT_MARKER_";
+    const HASH_LEN: usize = 16;
+
+    let mut offset = 0;
+    while let Some(pos) = wasm[offset..]
+        .windows(PREFIX.len())
+        .position(|window| window == PREFIX)
+    {
+        let start = offset + pos + PREFIX.len();
+        let end = start + HASH_LEN;
+        if end <= wasm.len() && wasm[start..end].iter().all(u8::is_ascii_hexdigit) {
+            wasm[start..end].fill(b'0');
+            offset = end;
+        } else {
+            offset = start;
+        }
+    }
 }
 
 fn read_pkg(pkg: &Path) -> TaskResult<[Vec<u8>; 3]> {
@@ -459,5 +482,15 @@ mod tests {
 
         fs::write(dir.path().join(PANEL_CSS), b"body{margin:1}").unwrap();
         assert!(verify_manifest_on_disk(dir.path(), &manifest).is_err());
+    }
+
+    #[test]
+    fn normalizes_unused_wasm_split_marker_hash_in_place() {
+        let mut a = b"\0asm_WASM_SPLIT_MARKER_90a727bbbea312e2version".to_vec();
+        let mut b = b"\0asm_WASM_SPLIT_MARKER_7d0434b8a6d81eceversion".to_vec();
+        normalize_wasm_split_marker(&mut a);
+        normalize_wasm_split_marker(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(a, b"\0asm_WASM_SPLIT_MARKER_0000000000000000version");
     }
 }

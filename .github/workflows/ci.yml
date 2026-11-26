@@ -195,10 +195,11 @@ jobs:
         with:
           key: panel-rebuild
 
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+
       - name: Install cargo-leptos 0.3.12
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-leptos@0.3.12
+        run: cargo binstall --no-confirm cargo-leptos@0.3.12
 
       - name: Verify reproducible embedded panel assets
         run: cargo run --locked -p xtask -- verify-panel
