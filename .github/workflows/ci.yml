@@ -135,10 +135,12 @@ jobs:
             grep -qx 'LICENSE' <<< "${files}" || { echo "${pkg} is missing LICENSE"; exit 1; }
             grep -qx 'README.md' <<< "${files}" || { echo "${pkg} is missing README.md"; exit 1; }
           done
-          cargo package --locked --no-verify -p kat0-pipeline-protocol
-          cargo package --locked --no-verify -p kat0-pipeline-reporter
-          cargo package --locked --no-verify -p kat0-pipeline-playwright
-          cargo package --locked --no-verify -p kat0-pipeline
+          cargo package --locked -p kat0-pipeline-protocol
+          cargo package --locked --no-verify \
+            -p kat0-pipeline-protocol \
+            -p kat0-pipeline-reporter \
+            -p kat0-pipeline-playwright \
+            -p kat0-pipeline
           for crate in target/package/*.crate; do
             size="$(stat -c%s "${crate}")"
             echo "${crate}: ${size} bytes"

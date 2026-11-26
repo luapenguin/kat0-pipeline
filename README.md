@@ -73,6 +73,14 @@ kat0-pipeline import path/to/snapshot.json
 kat0-pipeline serve path/to/snapshot.json
 ```
 
+### Quickstart with `playwright-rs`
+
+Run the bundled self-contained Firefox demo (requires Playwright Firefox installed via `cargo run --locked -p kat0-pipeline-e2e --example install-browsers -- firefox`):
+
+```sh
+kat0-pipeline run --ui browser -- cargo run --locked -p kat0-pipeline-playwright --example playwright_demo
+```
+
 ## Rebuilding and verifying embedded panel assets (`xtask`)
 
 Whenever [`client/`](client/) or [`client/report.css`](client/report.css) changes, rebuild and verify the embedded assets using `cargo-leptos 0.3.12`:

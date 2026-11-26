@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/kat0-pipeline-reporter"
 readme.workspace = true
 description = "Async NDJSON v3 test reporter and atomic snapshot writer for kat0-pipeline"
 keywords = ["pipeline", "testing", "reporter", "e2e", "tokio"]
