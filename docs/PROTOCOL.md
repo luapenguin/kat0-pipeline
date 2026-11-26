@@ -12,16 +12,17 @@ Any producer â€” in Rust (via `kat0-pipeline-reporter`) or any other language â€
 
 ## 1. Live IPC Transport (`KAT0_PIPELINE_EVENTS_SOCK`)
 
-When `kat0-pipeline run` launches a child command on Unix platforms:
+When `kat0-pipeline run` launches a child command:
 
-1. The orchestrator creates a private temporary directory with mode `0700` and binds a Unix domain stream socket (`events.sock`).
-2. The socket path is passed to the child process in the environment variable:
+1. On **Unix** (Linux/macOS), the orchestrator creates a private temporary directory with mode `0700`, binds a Unix domain stream socket (`events.sock`), and verifies connecting peer UIDs via `peer_cred()`.
+   On **Windows**, the orchestrator hosts a unique local-only Named Pipe (`\\.\pipe\kat0-pipeline-<pid>-<random>`, created with `first_pipe_instance(true)` and `reject_remote_clients(true)`).
+2. The endpoint path is passed to the child process in the environment variable:
    ```text
    KAT0_PIPELINE_EVENTS_SOCK
    ```
 3. Child `stdout` and `stderr` are left untouched for human/CI diagnostics.
-4. The producer connects to the Unix socket and writes **UTF-8, `\n`-delimited JSON objects** (one event per line; no embedded `\n` or `\r` inside a record).
-5. Blank lines are ignored. Multiple concurrent connections are accepted on the same socket, though a single serialized connection (as used by `kat0-pipeline-reporter`) guarantees ordering.
+4. The producer connects to the IPC endpoint and writes **UTF-8, `\n`-delimited JSON objects** (one event per line; no embedded `\n` or `\r` inside a record).
+5. Blank lines are ignored. Up to `32` concurrent connections are accepted on the same endpoint, though a single serialized connection (as used by `kat0-pipeline-reporter`) guarantees ordering. Connections that send oversized lines or exceed consecutive protocol error limits are closed immediately.
 
 ---
 

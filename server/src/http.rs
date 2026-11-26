@@ -10,8 +10,9 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::{StatusCode, header},
+    extract::{Request, State},
+    http::{HeaderName, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -23,6 +24,9 @@ use crate::{
     sse::{ClientPool, file_events, watch_events},
     wire,
 };
+
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline' data: 'wasm-unsafe-eval'; style-src data: 'unsafe-inline'; connect-src 'self' data:; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 
 /// Cloneable signal triggered before Axum waits for open connections to drain.
 #[derive(Clone)]
@@ -57,10 +61,14 @@ impl LocalServer {
         let runtime = Handle::try_current().map_err(io::Error::other)?;
         let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
-        let origin = format!("http://{}", listener.local_addr()?);
+        let bound_host = listener.local_addr()?.to_string();
+        let origin = format!("http://{bound_host}");
         let listener = TcpListener::from_std(listener)?;
         let (shutdown, receiver) = watch::channel(false);
-        let app = build_router(ShutdownSignal(receiver.clone()));
+        let expected_host: Arc<str> = Arc::from(bound_host);
+        let app = build_router(ShutdownSignal(receiver.clone())).layer(
+            middleware::from_fn_with_state(expected_host, security_guard),
+        );
         let mut stopped = ShutdownSignal(receiver);
         let task = runtime.spawn(async move {
             axum::serve(listener, app)
@@ -202,6 +210,55 @@ fn render_panel(bundle: &Bundle, snapshot: &Snapshot) -> Response {
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
     ([(header::CACHE_CONTROL, "no-store")], response).into_response()
+}
+
+/// Enforces strict loopback `Host` matching (DNS rebinding protection), blocks cross-site
+/// browser reads on live endpoints, and attaches baseline security headers to every response.
+async fn security_guard(
+    State(expected_host): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host_ok = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(&expected_host));
+    if !host_ok {
+        return apply_security_headers(StatusCode::MISDIRECTED_REQUEST.into_response());
+    }
+
+    let path = request.uri().path();
+    if matches!(path, "/events" | "/snapshot")
+        && let Some(fetch_site) = request
+            .headers()
+            .get(&SEC_FETCH_SITE)
+            .and_then(|value| value.to_str().ok())
+        && !matches!(fetch_site, "same-origin" | "none")
+    {
+        return apply_security_headers(StatusCode::FORBIDDEN.into_response());
+    }
+
+    apply_security_headers(next.run(request).await)
+}
+
+fn apply_security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -611,5 +668,77 @@ mod tests {
             .unwrap();
         let response = client.await.unwrap();
         assert!(response.starts_with("HTTP/1.1 204"));
+    }
+
+    async fn raw_request(server: &LocalServer, raw_http: &str) -> String {
+        let address = server.origin().strip_prefix("http://").unwrap();
+        timeout(Duration::from_secs(5), async {
+            let mut client = TcpStream::connect(address).await?;
+            client.write_all(raw_http.as_bytes()).await?;
+            let mut response = String::new();
+            client.read_to_string(&mut response).await?;
+            Ok::<_, io::Error>(response)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enforces_security_headers_host_validation_and_fetch_metadata() {
+        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let bundle = Arc::new(Bundle::for_test());
+        let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
+        let host = server.origin().strip_prefix("http://").unwrap();
+
+        // Valid request carries full security header baseline.
+        let ok = request(&server, "/").await;
+        assert!(ok.starts_with("HTTP/1.1 200"));
+        let lower = ok.to_ascii_lowercase();
+        assert!(lower.contains("cache-control: no-store"));
+        assert!(lower.contains("x-content-type-options: nosniff"));
+        assert!(lower.contains("x-frame-options: deny"));
+        assert!(lower.contains("referrer-policy: no-referrer"));
+        assert!(lower.contains("content-security-policy: default-src 'none'"));
+
+        // Mismatched Host header (DNS rebinding) is rejected with 421.
+        let rebind = raw_request(
+            &server,
+            "GET / HTTP/1.1\r\nHost: evil.example:1234\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(rebind.starts_with("HTTP/1.1 421"));
+        assert!(
+            rebind
+                .to_ascii_lowercase()
+                .contains("x-frame-options: deny")
+        );
+
+        // Cross-site browser fetch to /snapshot or /events is rejected with 403.
+        for path in ["/snapshot", "/events"] {
+            let cross = raw_request(
+                &server,
+                &format!(
+                    "GET {path} HTTP/1.1\r\nHost: {host}\r\nSec-Fetch-Site: cross-site\r\nConnection: close\r\n\r\n"
+                ),
+            )
+            .await;
+            assert!(
+                cross.starts_with("HTTP/1.1 403"),
+                "expected 403 for cross-site {path}, got: {cross}"
+            );
+        }
+
+        // Same-origin fetch to /snapshot succeeds.
+        let same_origin = raw_request(
+            &server,
+            &format!(
+                "GET /snapshot HTTP/1.1\r\nHost: {host}\r\nSec-Fetch-Site: same-origin\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(same_origin.starts_with("HTTP/1.1 200"));
+
+        server.close().await.unwrap();
     }
 }

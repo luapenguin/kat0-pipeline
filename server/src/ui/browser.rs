@@ -57,6 +57,10 @@ impl BrowserSession {
 }
 
 fn open_in_default_browser(url: &str) {
+    if !is_safe_loopback_url(url) {
+        eprintln!("[kat0-pipeline] Refusing to open unexpected browser URL.");
+        return;
+    }
     let mut command = browser_command(url);
     let spawned = command
         .stdin(Stdio::null())
@@ -67,6 +71,20 @@ fn open_in_default_browser(url: &str) {
     if spawned.is_err() {
         eprintln!("[kat0-pipeline] Open the URL above in your browser.");
     }
+}
+
+/// Validates that `url` is strictly `http://127.0.0.1:<nonzero-port>/` so OS browser launchers
+/// (including `cmd /C start` on Windows) can never receive shell metacharacters or remote URLs.
+fn is_safe_loopback_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let Some(port_str) = rest.strip_suffix('/') else {
+        return false;
+    };
+    !port_str.is_empty()
+        && port_str.bytes().all(|byte| byte.is_ascii_digit())
+        && port_str.parse::<u16>().is_ok_and(|port| port != 0)
 }
 
 #[cfg(target_os = "macos")]
@@ -88,4 +106,19 @@ fn browser_command(url: &str) -> Command {
     let mut cmd = Command::new("xdg-open");
     cmd.arg(url);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_only_strict_loopback_urls_for_browser_launch() {
+        assert!(is_safe_loopback_url("http://127.0.0.1:41234/"));
+        assert!(!is_safe_loopback_url("http://127.0.0.1:0/"));
+        assert!(!is_safe_loopback_url("http://127.0.0.1:41234"));
+        assert!(!is_safe_loopback_url("http://127.0.0.1:41234/&calc.exe/"));
+        assert!(!is_safe_loopback_url("https://127.0.0.1:41234/"));
+        assert!(!is_safe_loopback_url("http://example.com:80/"));
+    }
 }

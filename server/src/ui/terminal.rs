@@ -3,9 +3,12 @@
 use std::{
     collections::HashMap,
     env,
-    fs::File,
     io::{self, IsTerminal as _, Write},
     path::Path,
+};
+#[cfg(unix)]
+use std::{
+    fs::File,
     process::{Command, Stdio},
 };
 
@@ -373,6 +376,7 @@ fn detect_terminal_width() -> usize {
     {
         return cols;
     }
+    #[cfg(unix)]
     if let Ok(tty) = File::open("/dev/tty")
         && let Ok(output) = Command::new("stty")
             .arg("size")
