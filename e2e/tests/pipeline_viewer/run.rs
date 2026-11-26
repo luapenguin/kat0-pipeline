@@ -105,7 +105,7 @@ pub(super) async fn check(browser: &Browser, renderer: &Renderer) -> TestResult 
     let gate = renderer.root().join("continue.flag");
     let gate_arg = gate
         .to_str()
-        .ok_or("La ruta temporal del test no es UTF-8")?;
+        .ok_or("Temporary test path is not valid UTF-8")?;
 
     let report = renderer
         .with_orchestrated_run(
@@ -173,7 +173,7 @@ async fn check_live_sse(page: &Page, gate: &Path) -> TestResult {
     let after_terminal = sse_requests.load(Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(600)).await;
     if sse_requests.load(Ordering::Relaxed) != after_terminal {
-        return Err("EventSource intentó reconectar a /events tras el estado terminal".into());
+        return Err("EventSource attempted to reconnect to /events after terminal state".into());
     }
     Ok(())
 }

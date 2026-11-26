@@ -34,7 +34,7 @@ impl Renderer {
         ))?;
         if !bin.is_file() {
             return Err(format!(
-                "Falta el binario precompilado {}; desde la raíz ejecuta `{BUILD}` o indica el binario con PIPELINE_REPORT_BIN",
+                "Missing prebuilt binary {}; run `{BUILD}` from the workspace root or set PIPELINE_REPORT_BIN",
                 bin.display(),
             )
             .into());
@@ -82,7 +82,7 @@ impl Renderer {
             output.status.success()
         };
         if !expected_exit {
-            return Err(format!("{flag}: código de salida inesperado ({})", output.status).into());
+            return Err(format!("{flag}: unexpected exit status ({})", output.status).into());
         }
 
         let stdout = std::str::from_utf8(&output.stdout)?;
@@ -90,14 +90,14 @@ impl Renderer {
             .lines()
             .find_map(|line| line.strip_prefix(prefix))
             .map(Path::new)
-            .ok_or_else(|| format!("{flag}: no anunció el informe en stdout"))?;
+            .ok_or_else(|| format!("{flag}: did not announce report path on stdout"))?;
         if !path.is_absolute() {
-            return Err(format!("{flag}: la ruta anunciada no es absoluta").into());
+            return Err(format!("{flag}: announced report path is not absolute").into());
         }
         let path = fs::canonicalize(path).await?;
         if !path.starts_with(&self.root) || !path.is_file() {
             return Err(
-                format!("{flag}: no guardó un archivo dentro de PIPELINE_REPORT_ROOT").into(),
+                format!("{flag}: did not save report file inside PIPELINE_REPORT_ROOT").into(),
             );
         }
         Ok(path)
@@ -115,34 +115,29 @@ impl Renderer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut stdout = BufReader::new(child.stdout.take().ok_or("Falta stdout de serve")?);
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("Missing serve stdout")?);
         let checked = async {
             let mut line = String::new();
-            within(
-                CLI_TIMEOUT,
-                "Arranque de serve",
-                stdout.read_line(&mut line),
-            )
-            .await?;
+            within(CLI_TIMEOUT, "Starting serve", stdout.read_line(&mut line)).await?;
             let origin = parse_loopback_origin(line.trim_end_matches('\n'))
-                .ok_or("serve no anunció un origen loopback válido en stdout")?;
+                .ok_or("serve did not announce a valid loopback origin on stdout")?;
             check(&origin).await
         }
         .await;
 
         // Keep both pipes alive through the browser check; stdin EOF owns shutdown.
         drop(child.stdin.take());
-        let closed = within(CLOSE, "Cierre de serve por EOF", async {
+        let closed = within(CLOSE, "Closing serve on stdin EOF", async {
             let mut sink = io::sink();
             let (exit, extra_bytes) =
                 tokio::try_join!(child.wait(), io::copy(&mut stdout, &mut sink))?;
             if !exit.success() {
-                return Err(
-                    format!("serve no terminó correctamente al cerrar stdin ({exit})").into(),
-                );
+                return Err(format!("serve failed to exit cleanly on stdin EOF ({exit})").into());
             }
             if extra_bytes != 0 {
-                return Err("serve imprimió más que el anuncio de origen".into());
+                return Err(
+                    "serve printed unexpected output beyond the origin announcement".into(),
+                );
             }
             Ok::<(), BoxError>(())
         })
@@ -167,16 +162,16 @@ impl Renderer {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut stdout = BufReader::new(child.stdout.take().ok_or("Falta stdout de run")?);
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("Missing run stdout")?);
 
-        let origin = within(CLI_TIMEOUT, "Arranque de run --ui browser", async {
+        let origin = within(CLI_TIMEOUT, "Starting run --ui browser", async {
             let mut line = String::new();
             loop {
                 line.clear();
                 let read = stdout.read_line(&mut line).await?;
                 if read == 0 {
                     return Err::<String, BoxError>(
-                        "kat0-pipeline run terminó antes de anunciar su origen loopback".into(),
+                        "kat0-pipeline run exited before announcing its loopback origin".into(),
                     );
                 }
                 if let Some(url) = line.trim_end().strip_prefix(LIVE_URL_PREFIX)
@@ -189,7 +184,7 @@ impl Renderer {
         .await?;
 
         let checked = check(&origin).await;
-        let finished = within(CLI_TIMEOUT, "Cierre de run --ui browser", async {
+        let finished = within(CLI_TIMEOUT, "Finishing run --ui browser", async {
             let mut remaining = String::new();
             let (exit, _) = tokio::try_join!(child.wait(), async {
                 let mut line = String::new();
@@ -201,17 +196,17 @@ impl Renderer {
             })?;
             if !exit.success() {
                 return Err::<PathBuf, BoxError>(
-                    format!("kat0-pipeline run devolvió un estado inesperado ({exit})").into(),
+                    format!("kat0-pipeline run returned unexpected status ({exit})").into(),
                 );
             }
             let report = remaining
                 .lines()
                 .find_map(|line| line.strip_prefix(RUN_REPORT_PREFIX))
                 .map(Path::new)
-                .ok_or("kat0-pipeline run no anunció el informe HTML final")?;
+                .ok_or("kat0-pipeline run did not announce final HTML report")?;
             let canonical = fs::canonicalize(report).await?;
             if !canonical.starts_with(&self.root) || !canonical.is_file() {
-                return Err("kat0-pipeline run guardó el informe fuera de --report-dir".into());
+                return Err("kat0-pipeline run saved report outside --report-dir".into());
             }
             Ok(canonical)
         })

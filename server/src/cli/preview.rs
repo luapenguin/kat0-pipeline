@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use kat0_pipeline::{
-    RunResult, bundle::Bundle, prepare::reserve_report, protocol::model::Snapshot, wire,
-};
+use kat0_pipeline_protocol::model::Snapshot;
+
+use crate::{RunResult, bundle::Bundle, prepare::reserve_report, wire};
 
 use super::publication::{finish_report, report_root};
 
@@ -27,7 +27,7 @@ pub(super) async fn report() -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kat0_pipeline::protocol::model::Status;
+    use kat0_pipeline_protocol::model::Status;
 
     #[test]
     fn regression_snapshot_covers_all_job_states() {

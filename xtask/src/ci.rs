@@ -281,7 +281,27 @@ fn run_lint_and_unit(root: &Path) -> TaskResult {
     extend_package_flags(&mut test_args, &HOST_CRATES);
     run_cmd(root, "cargo", &test_args, &skip_driver)?;
 
+    verify_shared_fixtures(root)?;
     panel::verify(false)
+}
+
+/// Ensures duplicated packaging fixtures stay byte-for-byte identical between workspace crates.
+fn verify_shared_fixtures(root: &Path) -> TaskResult {
+    let protocol_fixture = root.join("protocol/fixtures/web_regression_v3.ndjson");
+    let server_fixture = root.join("server/fixtures/web_regression_v3.ndjson");
+    let left = fs::read(&protocol_fixture)
+        .map_err(|error| format!("Failed to read {}: {error}", protocol_fixture.display()))?;
+    let right = fs::read(&server_fixture)
+        .map_err(|error| format!("Failed to read {}: {error}", server_fixture.display()))?;
+    if left != right {
+        return Err(format!(
+            "Shared NDJSON v3 fixture drifted between {} and {}",
+            protocol_fixture.display(),
+            server_fixture.display()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn run_msrv(
@@ -616,5 +636,6 @@ mod tests {
             .unwrap();
         assert!(verify_packaged_metadata_files("demo", "Cargo.toml\nREADME.md\n").is_err());
         assert!(verify_packaged_metadata_files("demo", "Cargo.toml\nLICENSE\n").is_err());
+        verify_shared_fixtures(&panel::workspace_root()).unwrap();
     }
 }

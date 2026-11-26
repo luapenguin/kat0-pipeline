@@ -98,7 +98,7 @@ impl LocalServer {
                 task.abort();
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "El servidor local no se cerró a tiempo",
+                    "Local server did not shut down in time",
                 ))
             }
         }

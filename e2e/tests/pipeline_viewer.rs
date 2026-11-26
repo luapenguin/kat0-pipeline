@@ -85,7 +85,7 @@ async fn within<T, E: Into<BoxError>>(
 ) -> TestResult<T> {
     timeout(limit, action)
         .await
-        .map_err(|_| format!("{phase}: agotado el plazo de {} s", limit.as_secs()))?
+        .map_err(|_| format!("{phase}: timed out after {} s", limit.as_secs()))?
         .map_err(Into::into)
 }
 
@@ -100,8 +100,8 @@ async fn check_panel(
     check: impl AsyncFnOnce(&Page) -> TestResult,
 ) -> TestResult {
     let (url, offline, phase) = match report {
-        ReportLocation::Saved(path) => (file_url(path)?, true, "Informe sin conexión"),
-        ReportLocation::Live(origin) => (origin.to_owned(), false, "Informe en vivo"),
+        ReportLocation::Saved(path) => (file_url(path)?, true, "Offline report"),
+        ReportLocation::Live(origin) => (origin.to_owned(), false, "Live report"),
     };
     let options = BrowserContextOptions::builder()
         .offline(offline)
@@ -109,7 +109,7 @@ async fn check_panel(
         .build();
     let context = within(
         CLOSE,
-        "Apertura del contexto",
+        "Opening browser context",
         browser.new_context_with_options(options),
     )
     .await?;
@@ -131,7 +131,7 @@ async fn check_panel(
         }
         let response = page.goto(&url, None).await?;
         if !offline && !response.is_some_and(|response| response.ok()) {
-            return Err("El servidor local no sirvió el panel".into());
+            return Err("Local server failed to serve the panel".into());
         }
         expect(page.locator("#panel-ready.snapshot-view"))
             .to_be_visible()
@@ -139,15 +139,15 @@ async fn check_panel(
         check(&page).await
     })
     .await;
-    let closed = within(CLOSE, "Cierre del contexto", context.close()).await;
+    let closed = within(CLOSE, "Closing browser context", context.close()).await;
     checked.and(closed).map_err(|error| {
         format!(
             "{phase}: {}",
-            error.to_string().replace(&url, "[URL temporal]")
+            error.to_string().replace(&url, "[temporary URL]")
         )
     })?;
     if http_requests.load(Ordering::Relaxed) != 0 {
-        return Err("El informe autónomo intentó hacer peticiones HTTP".into());
+        return Err("Standalone offline report attempted HTTP requests".into());
     }
     Ok(())
 }

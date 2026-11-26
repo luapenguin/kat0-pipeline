@@ -41,10 +41,6 @@ impl BrowserSession {
         Ok(Self { updates, server })
     }
 
-    pub fn origin(&self) -> &str {
-        self.server.origin()
-    }
-
     pub fn publish(&self, snapshot: Arc<Snapshot>) {
         let _ = self.updates.send(PublishedSnapshot::new(snapshot));
     }

@@ -14,7 +14,7 @@ use crate::RunResult;
 pub(crate) async fn read_bytes(path: &Path, max_bytes: usize) -> RunResult<Vec<u8>> {
     let metadata = fs::metadata(path).await?;
     if !metadata.is_file() {
-        return Err("El resultado debe ser un archivo regular".into());
+        return Err("Result path must be a regular file".into());
     }
     check_size(metadata.len(), max_bytes)?;
     let mut bytes = Vec::new();

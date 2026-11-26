@@ -9,9 +9,9 @@ Live terminal and browser pipeline runner, NDJSON v3 event protocol, and standal
 This workspace contains seven crates sharing a single `Cargo.lock` and producing a single CLI binary (`kat0-pipeline`):
 
 - [`protocol`](protocol/src/lib.rs) (`kat0-pipeline-protocol`): pure `serde` library with zero I/O or async runtime dependencies. Defines the hierarchical `Job -> Case -> Step` model (`Definition`, `Snapshot`, `Status`, `FailureKind`), `PipelineBuilder`, size limits, v2 snapshot codec, and NDJSON v3 event/reducer state machine.
-- [`reporter`](reporter/src/lib.rs) (`kat0-pipeline-reporter`): async producer library (Tokio + Unix socket IPC) with zero `axum`, `leptos`, or `playwright-rs` dependencies. Provides clonable `Send + Sync` `Reporter`, `TickGuard`, `TypedFailure`, `TaskFailure`, `SnapshotFile`, and execution combinators (`execute`).
+- [`reporter`](reporter/src/lib.rs) (`kat0-pipeline-reporter`): async producer library (Tokio + private Unix socket / Windows Named Pipe IPC) with zero `axum`, `leptos`, or `playwright-rs` dependencies. Provides clonable `Send + Sync` `Reporter`, `TickGuard`, `TypedFailure`, `TaskFailure`, `SnapshotFile`, and execution combinators (`execute`).
 - [`playwright`](playwright/src/lib.rs) (`kat0-pipeline-playwright`): optional adapter crate isolating `playwright-rs` error classification (`classify_error`, `assertion_error`, `startup_error`) and safe browser/context lifecycle helpers (`FirefoxSession`, `with_context`, `with_page`).
-- [`server`](server/src/lib.rs) (`kat0-pipeline`): host-only CLI binary with embedded WASM/JS/CSS panel assets (no `leptos` or `playwright-rs` dependency, no runtime Cargo/WASM build required).
+- [`server`](server/src/main.rs) (`kat0-pipeline`): host-only CLI binary with embedded WASM/JS/CSS panel assets (no `leptos` or `playwright-rs` dependency, no runtime Cargo/WASM build required).
 - [`client`](client/src/lib.rs) (`kat0-pipeline-client`, `publish = false`): Leptos CSR WASM panel rendering live SSE (`/events`, `/snapshot` resync) and standalone offline reports.
 - [`xtask`](xtask/src/main.rs) (`publish = false`): reproducible build and SHA-256 verification of the embedded panel assets under [`server/assets/`](server/assets/).
 - [`e2e`](e2e/README.md) (`kat0-pipeline-e2e`, `publish = false`): Firefox browser verification suite for the offline report, live SSE viewer, and orchestrated `run` command.
@@ -55,7 +55,7 @@ Options for `run`:
 - `--report-dir <DIR>`: root output directory for `run-*/` (default: `PIPELINE_REPORT_ROOT`, `./target/pipeline`, or `<temp>/kat0-pipeline`)
 - `--grace-ms <MS>`: loopback server grace period after completion (`0..=60000`, default `2000`)
 
-The orchestrator binds a private `0700` Unix domain socket (on Unix platforms) and passes its path to the child process via `KAT0_PIPELINE_EVENTS_SOCK`. Child `stdout`/`stderr` stay untouched for human diagnostics.
+The orchestrator binds a private `0700` Unix domain socket (with peer UID verification on Unix) or a local-only Named Pipe (`reject_remote_clients(true)` on Windows) and passes its path to the child process via `KAT0_PIPELINE_EVENTS_SOCK`. Child `stdout`/`stderr` stay untouched for human diagnostics.
 
 ### Generate a standalone sample report (`sample`)
 

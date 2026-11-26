@@ -56,14 +56,9 @@ impl RunOptions {
     }
 }
 
-pub struct RunArtifacts {
-    pub snapshot_path: PathBuf,
-    pub html_path: Option<PathBuf>,
-}
-
-/// Orchestrates an external test command connected over a private `0700` Unix domain socket,
+/// Orchestrates an external test command connected over a private local IPC endpoint,
 /// streaming NDJSON v3 events into the selected UI presenter(s) and publishing final artifacts.
-pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
+pub async fn execute(options: RunOptions) -> RunResult {
     let mut bundle = match options.bundle {
         Some(prebuilt) => Some(prebuilt),
         None if options.ui.uses_browser() => Some(Arc::new(Bundle::embedded()?)),
@@ -83,7 +78,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         .spawn()
         .map_err(|error| {
             format!(
-                "No se pudo iniciar {}: {error}",
+                "Failed to start {}: {error}",
                 Path::new(&options.command).display()
             )
         })?;
@@ -135,12 +130,10 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         if let Some(browser) = browser {
             let _ = browser.close(Duration::ZERO).await;
         }
-        let detail = child_status.map_or_else(
-            || "sin estado de salida".to_owned(),
-            |status| status.to_string(),
-        );
+        let detail =
+            child_status.map_or_else(|| "no exit status".to_owned(), |status| status.to_string());
         return Err(format!(
-            "El productor terminó ({detail}) sin emitir run_started por {EVENTS_SOCK_ENV}"
+            "Producer exited ({detail}) without emitting run_started on {EVENTS_SOCK_ENV}"
         )
         .into());
     };
@@ -204,7 +197,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         }
         validation
             .result
-            .map_err(Box::<dyn std::error::Error>::from)
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
     } else if failures.is_empty() {
         Ok(())
     } else {
@@ -212,7 +205,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
             .drain(..)
             .map(|failure| failure.to_string())
             .collect::<Vec<_>>()
-            .join("\nAdemás: ");
+            .join("\nAlso: ");
         Err(combined.into())
     };
 
@@ -227,10 +220,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
     }
 
     report_validation?;
-    Ok(RunArtifacts {
-        snapshot_path,
-        html_path: published_html,
-    })
+    Ok(())
 }
 
 struct RunSession {
@@ -317,13 +307,13 @@ fn collect_failures(
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: "Ejecución interrumpida por señal del usuario".into(),
+            cause: "Execution interrupted by user signal".into(),
         });
     } else if state.snapshot().status == Status::Failed && failures.is_empty() {
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: "La ejecución terminó con fallos".into(),
+            cause: "Execution finished with failures".into(),
         });
     }
 
@@ -334,7 +324,7 @@ fn collect_failures(
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: format!("El productor devolvió código de salida no exitoso ({status})").into(),
+            cause: format!("Producer exited with non-zero status ({status})").into(),
         });
     }
     failures
@@ -359,7 +349,7 @@ fn map_recorded_failure(entry: &RecordedFailure) -> Failure {
             job: entry.job_id.clone(),
             step,
         },
-        cause: "El productor registró este fallo".into(),
+        cause: "Producer recorded this failure".into(),
     }
 }
 
@@ -369,7 +359,7 @@ async fn write_snapshot_atomic(path: &Path, snapshot: &Snapshot) -> RunResult {
     tokio::task::spawn_blocking(move || -> io::Result<()> {
         let parent = path
             .parent()
-            .ok_or_else(|| io::Error::other("El snapshot requiere un directorio"))?;
+            .ok_or_else(|| io::Error::other("Snapshot path requires a parent directory"))?;
         std::fs::create_dir_all(parent)?;
         let mut staged = tempfile::Builder::new()
             .prefix(".snapshot-")
@@ -456,9 +446,11 @@ mod tests {
         options.write_html = false;
         options.open_browser = false;
 
-        let artifacts = execute(options).await.unwrap();
-        assert!(artifacts.html_path.is_none());
-        let snapshot = decode(&fs::read(&artifacts.snapshot_path).await.unwrap()).unwrap();
+        execute(options).await.unwrap();
+        let mut entries = fs::read_dir(root.path()).await.unwrap();
+        let run_dir = entries.next_entry().await.unwrap().unwrap().path();
+        assert!(!run_dir.join("index.html").exists());
+        let snapshot = decode(&fs::read(run_dir.join("snapshot.json")).await.unwrap()).unwrap();
         assert_eq!(snapshot.status, Status::Passed);
         assert_eq!(snapshot.elapsed_ms, 80);
     }
@@ -486,10 +478,9 @@ mod tests {
 
         let error = execute(options)
             .await
-            .err()
-            .expect("failed fixture must return error");
+            .expect_err("failed fixture must return error");
         let display = error.to_string();
-        assert!(display.contains("Aserción fallida"));
+        assert!(display.contains("Assertion failed"));
         assert!(display.contains("errors-recovery"));
         assert!(display.contains("dns-races/retry-write"));
 

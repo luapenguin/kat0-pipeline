@@ -24,13 +24,13 @@ pub enum FailureKind {
 impl FailureKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Startup => "Fallo de arranque",
-            Self::Assertion => "Aserción fallida",
-            Self::Timeout => "Tiempo de espera agotado",
-            Self::Execution => "Fallo de ejecución",
-            Self::ReportWrite => "Fallo al guardar el informe",
-            Self::ReportMissing => "Falta el informe esperado",
-            Self::ReportCheck => "No se pudo verificar el informe",
+            Self::Startup => "Startup failure",
+            Self::Assertion => "Assertion failed",
+            Self::Timeout => "Operation timed out",
+            Self::Execution => "Execution failure",
+            Self::ReportWrite => "Failed to save report",
+            Self::ReportMissing => "Expected report is missing",
+            Self::ReportCheck => "Failed to verify report",
         }
     }
 }
@@ -46,7 +46,7 @@ pub enum FailureSite {
 pub struct Failure {
     pub kind: FailureKind,
     pub site: FailureSite,
-    pub cause: Box<dyn Error>,
+    pub cause: Box<dyn Error + Send + Sync>,
 }
 
 impl fmt::Display for Failure {
@@ -57,7 +57,7 @@ impl fmt::Display for Failure {
             FailureSite::Task { job, step } => {
                 write!(formatter, "Job {job:?}")?;
                 if let Some(step) = step {
-                    write!(formatter, ", paso {step:?}")?;
+                    write!(formatter, ", step {step:?}")?;
                 }
                 formatter.write_str(": ")?;
             }
@@ -87,7 +87,7 @@ impl fmt::Display for ValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, failure) in self.failures().iter().enumerate() {
             if index != 0 {
-                formatter.write_str("\nAdemás: ")?;
+                formatter.write_str("\nAlso: ")?;
             }
             write!(formatter, "{failure}")?;
         }
@@ -141,7 +141,7 @@ async fn check_report(path: &Path, saved: RunResult) -> Result<(), Failure> {
                 FailureKind::ReportCheck,
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Se esperaba un archivo regular no vacío",
+                    "Expected a non-empty regular file",
                 )
                 .into(),
             ),

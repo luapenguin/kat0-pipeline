@@ -38,28 +38,28 @@ async fn alternate_flow() -> TestResult<Value> {
     let bytes = tokio::fs::read(fixture).await?;
     let mut document: Value = serde_json::from_slice(&bytes)?;
     if document["schema_version"] != 2 {
-        return Err("El fixture canónico debe ser un snapshot v2".into());
+        return Err("Canonical fixture must be a v2 snapshot".into());
     }
 
     // Exercise caller-defined topology without maintaining a second sample fixture.
     let snapshot = document
         .get_mut("snapshot")
-        .ok_or("Falta snapshot en el fixture canónico")?;
+        .ok_or("Missing snapshot in canonical fixture")?;
     let columns = snapshot
         .pointer_mut("/definition/columns")
         .and_then(Value::as_array_mut)
-        .ok_or("Faltan columnas en el fixture canónico")?;
+        .ok_or("Missing columns in canonical fixture")?;
     columns.truncate(2);
     let regression = columns
         .get_mut(1)
         .and_then(|column| column.get_mut("jobs"))
         .and_then(Value::as_array_mut)
-        .ok_or("Faltan jobs de la fase Regression")?;
+        .ok_or("Missing Regression stage jobs")?;
     regression.retain(|job| job["id"] == "browse-orgs");
     let jobs = snapshot
         .get_mut("jobs")
         .and_then(Value::as_object_mut)
-        .ok_or("Faltan jobs en el snapshot")?;
+        .ok_or("Missing jobs map in snapshot")?;
     jobs.retain(|id, _| matches!(id.as_str(), "prepare-env" | "browse-orgs"));
     snapshot["definition"]["title"] = json!(TITLE);
     snapshot["definition"]["description"] = json!(DESCRIPTION);
@@ -69,7 +69,7 @@ async fn alternate_flow() -> TestResult<Value> {
 fn replace_snapshot(path: &Path, document: &Value) -> TestResult {
     // Stage beside the input so the live reader never sees a partially written snapshot.
     let mut staged =
-        tempfile::NamedTempFile::new_in(path.parent().ok_or("Falta directorio del snapshot")?)?;
+        tempfile::NamedTempFile::new_in(path.parent().ok_or("Snapshot path missing parent dir")?)?;
     serde_json::to_writer(staged.as_file_mut(), document)?;
     staged.persist(path).map_err(|error| error.error)?;
     Ok(())
@@ -85,17 +85,17 @@ fn finish(document: &mut Value, elapsed_ms: u64) -> TestResult {
     ] {
         let row = snapshot
             .pointer_mut(pointer)
-            .ok_or_else(|| format!("Falta {pointer}"))?;
+            .ok_or_else(|| format!("Missing {pointer}"))?;
         let duration = row["started_ms"]
             .as_u64()
             .and_then(|start| elapsed_ms.checked_sub(start))
-            .ok_or_else(|| format!("Inicio inválido en {pointer}"))?;
+            .ok_or_else(|| format!("Invalid start timestamp at {pointer}"))?;
         row["status"] = json!("failed");
         row["duration_ms"] = json!(duration);
     }
     *snapshot
         .pointer_mut("/jobs/browse-orgs/steps/check-history/status")
-        .ok_or("Falta el estado de Check back navigation")? = json!("skipped");
+        .ok_or("Missing status for Check back navigation")? = json!("skipped");
     Ok(())
 }
 
@@ -208,7 +208,7 @@ async fn check_served_snapshot(page: &Page, document: &Value) -> TestResult {
         )
         .await?;
     if served != document["snapshot"] {
-        return Err("GET /snapshot no devolvió el snapshot del archivo activo".into());
+        return Err("GET /snapshot did not return the active file snapshot".into());
     }
     Ok(())
 }

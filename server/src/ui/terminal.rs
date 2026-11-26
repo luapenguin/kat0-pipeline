@@ -60,10 +60,6 @@ impl TerminalPresenter<io::Stdout> {
 }
 
 impl<W: Write> TerminalPresenter<W> {
-    pub fn new(writer: W, is_tty: bool) -> Self {
-        Self::with_width(writer, is_tty, DEFAULT_TTY_WIDTH)
-    }
-
     pub fn with_width(writer: W, is_tty: bool, width: usize) -> Self {
         Self {
             writer,

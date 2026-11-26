@@ -16,7 +16,7 @@ impl fmt::Display for ReserveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "No se pudo reservar el directorio de ejecución en {}: {}",
+            "Failed to reserve run directory under {}: {}",
             self.root.display(),
             self.source
         )

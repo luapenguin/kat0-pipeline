@@ -77,7 +77,7 @@ impl Bundle {
         let snapshot_at = unique_offset(&html, &format!("{DATA_TAG}{SNAPSHOT_SLOT}{SCRIPT_END}"))?
             + DATA_TAG.len();
         if live_at + "false".len() > snapshot_at {
-            return Err("#panel debe preceder al bloque #run-data".into());
+            return Err("#panel must precede #run-data".into());
         }
         Ok(Self {
             html,
@@ -117,9 +117,9 @@ fn unique_offset(text: &str, marker: &str) -> RunResult<usize> {
     let mut matches = text.match_indices(marker);
     match (matches.next(), matches.next()) {
         (Some((offset, _)), None) => Ok(offset),
-        _ => Err(
-            format!("Se esperaba una sola aparición de {marker:?} al empaquetar el informe").into(),
-        ),
+        _ => {
+            Err(format!("Expected a single occurrence of {marker:?} while bundling report").into())
+        }
     }
 }
 

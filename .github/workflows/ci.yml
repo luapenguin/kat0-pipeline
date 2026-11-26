@@ -1,6 +1,14 @@
-name: CI (Manual)
+name: CI
 
 on:
+  push:
+    branches:
+      - main
+      - development
+  pull_request:
+    branches:
+      - main
+      - development
   workflow_dispatch:
     inputs:
       run_msrv:
@@ -24,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-manual-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -32,7 +40,7 @@ env:
 
 jobs:
   lint-and-unit:
-    name: Lint, docs, and tests
+    name: Lint, docs, and tests (Linux)
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
@@ -86,50 +94,48 @@ jobs:
           -p xtask
           -p kat0-pipeline-e2e
 
+      - name: Verify shared fixtures parity
+        run: cmp -s protocol/fixtures/web_regression_v3.ndjson server/fixtures/web_regression_v3.ndjson
+
       - name: Verify embedded panel manifest
         run: cargo run --locked -p xtask -- verify-panel --manifest-only
 
-  msrv:
-    name: MSRV core (Rust 1.88)
-    if: inputs.run_msrv
+  security-audit:
+    name: Supply-chain and license audit (cargo-deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@1.88.0
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          key: msrv-1.88
+          arguments: --locked check
 
-      - name: Check and test core publishable crates on MSRV 1.88
-        run: >
-          cargo test --locked
-          -p kat0-pipeline-protocol
-          -p kat0-pipeline-reporter
-          -p kat0-pipeline
-
-  msrv-playwright:
-    name: MSRV playwright (Rust 1.95)
-    if: inputs.run_msrv
-    runs-on: ubuntu-latest
+  windows-unit:
+    name: Build and tests (Windows Named Pipes)
+    runs-on: windows-latest
     env:
       PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.95
+          key: windows-unit
 
-      - name: Check and test kat0-pipeline-playwright on MSRV 1.95
-        run: cargo test --locked -p kat0-pipeline-playwright
+      - name: Tests on Windows
+        run: >
+          cargo test --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+          -p xtask
 
   package-and-install:
     name: Package and clean cargo install
-    if: inputs.run_package_check
+    if: github.event_name != 'workflow_dispatch' || inputs.run_package_check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -179,9 +185,53 @@ jobs:
           )
           find "${out_dir}" -name 'index.html' | grep -q 'index.html'
 
+  msrv:
+    name: MSRV core (Rust 1.88)
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_msrv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.88
+
+      - name: Check and test core publishable crates on MSRV 1.88
+        run: >
+          cargo test --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline
+
+  msrv-playwright:
+    name: MSRV playwright (Rust 1.95)
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_msrv)
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.95
+
+      - name: Check and test kat0-pipeline-playwright on MSRV 1.95
+        run: cargo test --locked -p kat0-pipeline-playwright
+
   assets-reproducibility:
     name: Panel assets reproducibility
-    if: inputs.run_panel_rebuild
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_panel_rebuild)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -206,7 +256,9 @@ jobs:
 
   e2e-firefox:
     name: E2E viewer (Playwright Firefox)
-    if: inputs.run_e2e_firefox
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_e2e_firefox)
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_DRIVER_CACHE_DIR: ${{ github.workspace }}/.playwright-driver

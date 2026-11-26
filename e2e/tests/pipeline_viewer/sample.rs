@@ -70,12 +70,12 @@ async fn check_graph(page: &Page) -> TestResult {
             .get_attribute("d")
             .await?
             .filter(|path| !path.is_empty())
-            .ok_or_else(|| format!("El icono del job {id} no tiene trazado"))?;
+            .ok_or_else(|| format!("Icon for job {id} has no path"))?;
         marks.insert(mark);
         check_metrics(job.locator(".job-metrics"), label, duration).await?;
     }
     if marks.len() != 5 {
-        return Err("Los cinco estados deben distinguirse por el icono".into());
+        return Err("All five job statuses must have distinct icons".into());
     }
     Ok(())
 }
@@ -92,7 +92,7 @@ async fn check_layout(page: &Page) -> TestResult {
     let desktop_path = branch
         .get_attribute("d")
         .await?
-        .ok_or("La rama no tiene trazado en escritorio")?;
+        .ok_or("Branch connection has no path on desktop")?;
 
     page.set_viewport_size(Viewport {
         width: 390,
@@ -121,7 +121,7 @@ async fn check_layout(page: &Page) -> TestResult {
         )
         .await?;
     if !only_graph_scrolls {
-        return Err("Solo el grafo debe desbordar horizontalmente a 390 px".into());
+        return Err("Only the pipeline graph should overflow horizontally at 390 px".into());
     }
     page.set_viewport_size(DESKTOP).await?;
     expect(branch).to_have_attribute("d", &desktop_path).await?;
@@ -144,7 +144,7 @@ async fn check_labels_fit(page: &Page) -> TestResult {
         )
         .await?;
     if !clipped.is_empty() {
-        return Err(format!("Tarjetas con texto recortado: {clipped:?}").into());
+        return Err(format!("Cards with clipped text: {clipped:?}").into());
     }
     Ok(())
 }
