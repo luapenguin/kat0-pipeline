@@ -351,7 +351,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> TaskResult {
     Ok(())
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask lives under the pipeline workspace root")

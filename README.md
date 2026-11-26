@@ -94,6 +94,23 @@ cargo run --locked -p xtask -- verify-panel
 
 ## Verification
 
+Run all 6 pre-push CI checks locally in one command via `xtask`:
+
+```sh
+# List the 6 local pre-push checks
+cargo run --locked -p xtask -- ci --list
+
+# Run all 6 checks (mirrors .github/workflows/ci.yml)
+cargo run --locked -p xtask -- ci
+
+# Or run a subset while iterating
+cargo run --locked -p xtask -- ci --only lint-and-unit,package-and-install
+```
+
+*(The two MSRV checks require `rustup toolchain install 1.88.0 1.95.0 --profile minimal` once, and `e2e-firefox` requires Playwright Firefox from [`e2e/README.md`](e2e/README.md).)*
+
+Individual checks:
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask -p kat0-pipeline-e2e --all-targets -- -D warnings
@@ -102,8 +119,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked -p kat0-pipeline-protocol -p kat0-
 cargo test --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask -p kat0-pipeline-e2e
 cargo run --locked -p xtask -- verify-panel
 ```
-
-For the full Playwright Firefox E2E suite, see [`e2e/README.md`](e2e/README.md).
 
 ## License
 
