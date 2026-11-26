@@ -38,6 +38,13 @@ All wire limits are enforced by `kat0-pipeline-protocol` (`protocol/src/limits.r
 | `MAX_SNAPSHOT_BYTES` | `512 KiB` | Complete v2 snapshot JSON document |
 | `MAX_EVENT_LINE_BYTES` | `16 KiB` | Any NDJSON v3 event line except `run_started` |
 | `MAX_RUN_STARTED_LINE_BYTES` | `128 KiB` | Initial `run_started` NDJSON v3 event line |
+| `MAX_COLUMNS` | `64` | Stage columns per pipeline definition |
+| `MAX_JOBS` | `256` | Total jobs across all columns |
+| `MAX_CASES_PER_JOB` | `512` | Nested cases per job (static + dynamic) |
+| `MAX_STEPS_PER_CONTAINER` | `256` | Direct steps per job or steps per case (static + dynamic) |
+| `MAX_TOTAL_CASES` | `2,048` | Total nested cases across an entire run |
+| `MAX_TOTAL_STEPS` | `8,192` | Total steps across an entire run |
+| `MAX_RECORDED_FAILURES` | `1,024` | Typed failures retained in memory by `RunState` |
 
 ---
 

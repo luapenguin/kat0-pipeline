@@ -137,7 +137,9 @@ fn data_url(mime: &str, bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kat0_pipeline_protocol::model::{Column, Definition, Job, Row, Status};
+    use std::collections::BTreeMap;
+
+    use kat0_pipeline_protocol::model::{Column, Definition, Job, JobState, Row, Status};
     use tokio::fs;
 
     use super::*;
@@ -233,13 +235,25 @@ mod tests {
     #[tokio::test]
     async fn publishes_complete_offline_html_for_a_failed_execution() {
         let bundle = Bundle::from_assets(TEMPLATE, b"js", b"\0asm", b"css").unwrap();
-        let mut snapshot = snapshot("Failed run");
-        snapshot.status = Status::Failed;
-        snapshot.jobs_mut().get_mut("check").unwrap().row = Row {
-            status: Status::Failed,
-            started_ms: Some(0),
-            duration_ms: Some(0),
-        };
+        let definition = snapshot("Failed run").definition().clone();
+        let snapshot = Snapshot::from_parts(
+            definition,
+            Status::Failed,
+            0,
+            BTreeMap::from([(
+                "check".into(),
+                JobState {
+                    row: Row {
+                        status: Status::Failed,
+                        started_ms: Some(0),
+                        duration_ms: Some(0),
+                    },
+                    steps: BTreeMap::new(),
+                    cases: BTreeMap::new(),
+                },
+            )]),
+        )
+        .unwrap();
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("run");
         let path = dir.join("index.html");

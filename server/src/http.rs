@@ -206,7 +206,9 @@ fn render_panel(bundle: &Bundle, snapshot: &Snapshot) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use kat0_pipeline_protocol::model::{Column, Definition, Job, Row, Status};
+    use std::collections::BTreeMap;
+
+    use kat0_pipeline_protocol::model::{Column, Definition, Job, JobState, Row, Status};
     use serde_json::{Value, json};
     use tokio::{
         fs,
@@ -282,7 +284,7 @@ mod tests {
     }
 
     fn minimal_snapshot(status: Status, elapsed_ms: u64) -> Snapshot {
-        let mut snapshot = Snapshot::new(Definition {
+        let definition = Definition {
             title: "Live run".into(),
             description: "SSE test".into(),
             columns: vec![Column {
@@ -296,11 +298,8 @@ mod tests {
                     cases: vec![],
                 }],
             }],
-        })
-        .unwrap();
-        snapshot.status = status;
-        snapshot.elapsed_ms = elapsed_ms;
-        snapshot.jobs_mut().get_mut("check").unwrap().row = match status {
+        };
+        let row = match status {
             Status::Running => Row {
                 status: Status::Running,
                 started_ms: Some(0),
@@ -313,7 +312,20 @@ mod tests {
             },
             _ => Row::pending(),
         };
-        snapshot
+        Snapshot::from_parts(
+            definition,
+            status,
+            elapsed_ms,
+            BTreeMap::from([(
+                "check".into(),
+                JobState {
+                    row,
+                    steps: BTreeMap::new(),
+                    cases: BTreeMap::new(),
+                },
+            )]),
+        )
+        .unwrap()
     }
 
     #[tokio::test]

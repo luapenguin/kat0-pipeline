@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt,
 };
 
 use crate::{
+    limits::{
+        MAX_CASES_PER_JOB, MAX_ID_BYTES, MAX_RECORDED_FAILURES, MAX_STEPS_PER_CONTAINER,
+        MAX_TOTAL_CASES, MAX_TOTAL_STEPS,
+    },
     model::{Case, CaseState, DefinitionError, FailureKind, Row, Snapshot, Status, Step, valid_id},
     v2::{WireError, validate_label, validate_snapshot},
 };
@@ -73,7 +77,15 @@ pub struct RunState {
     snapshot: Snapshot,
     workers: u16,
     failures: Vec<RecordedFailure>,
+    failed_jobs: HashSet<String>,
+    failed_cases: HashSet<(String, String)>,
+    job_locations: HashMap<String, (usize, usize)>,
+    case_locations: HashMap<(String, String), usize>,
+    step_locations: HashMap<(StepScope, String), usize>,
+    running_steps: HashSet<StepScope>,
     last_step_index: HashMap<StepScope, usize>,
+    total_cases: usize,
+    total_steps: usize,
 }
 
 impl RunState {
@@ -103,11 +115,51 @@ impl RunState {
         };
         let snapshot = Snapshot::new(definition)?;
         validate_snapshot(&snapshot)?;
+
+        let mut job_locations = HashMap::new();
+        let mut case_locations = HashMap::new();
+        let mut step_locations = HashMap::new();
+        let mut total_cases = 0usize;
+        let mut total_steps = 0usize;
+        for (col_idx, column) in snapshot.definition().columns.iter().enumerate() {
+            for (job_idx, job) in column.jobs.iter().enumerate() {
+                job_locations.insert(job.id.clone(), (col_idx, job_idx));
+                let job_scope = StepScope {
+                    job_id: job.id.clone(),
+                    case_id: None,
+                };
+                for (step_idx, step) in job.steps.iter().enumerate() {
+                    step_locations.insert((job_scope.clone(), step.id.clone()), step_idx);
+                }
+                total_steps += job.steps.len();
+                total_cases += job.cases.len();
+                for (case_idx, case) in job.cases.iter().enumerate() {
+                    case_locations.insert((job.id.clone(), case.id.clone()), case_idx);
+                    let case_scope = StepScope {
+                        job_id: job.id.clone(),
+                        case_id: Some(case.id.clone()),
+                    };
+                    for (step_idx, step) in case.steps.iter().enumerate() {
+                        step_locations.insert((case_scope.clone(), step.id.clone()), step_idx);
+                    }
+                    total_steps += case.steps.len();
+                }
+            }
+        }
+
         Ok(Self {
             snapshot,
             workers,
             failures: Vec::new(),
+            failed_jobs: HashSet::new(),
+            failed_cases: HashSet::new(),
+            job_locations,
+            case_locations,
+            step_locations,
+            running_steps: HashSet::new(),
             last_step_index: HashMap::new(),
+            total_cases,
+            total_steps,
         })
     }
 
@@ -200,6 +252,7 @@ impl RunState {
         let elapsed = elapsed_ms.max(self.snapshot.elapsed_ms);
         self.snapshot.elapsed_ms = elapsed;
         self.snapshot.status = Status::Failed;
+        self.running_steps.clear();
 
         let job_ids: Vec<String> = self
             .snapshot
@@ -207,6 +260,7 @@ impl RunState {
             .jobs()
             .map(|job| job.id.clone())
             .collect();
+        let mut aborted_failures = Vec::new();
         for job_id in job_ids {
             let Some(job) = self.snapshot.jobs_mut().get_mut(&job_id) else {
                 continue;
@@ -215,7 +269,7 @@ impl RunState {
             for (step_id, row) in &mut job.steps {
                 if abort_row(row, elapsed) {
                     recorded_inside_job = true;
-                    self.failures.push(RecordedFailure {
+                    aborted_failures.push(RecordedFailure {
                         job_id: job_id.clone(),
                         case_id: None,
                         step_id: Some(step_id.clone()),
@@ -229,7 +283,7 @@ impl RunState {
                     if abort_row(row, elapsed) {
                         recorded_inside_case = true;
                         recorded_inside_job = true;
-                        self.failures.push(RecordedFailure {
+                        aborted_failures.push(RecordedFailure {
                             job_id: job_id.clone(),
                             case_id: Some(case_id.clone()),
                             step_id: Some(step_id.clone()),
@@ -239,7 +293,7 @@ impl RunState {
                 }
                 if abort_row(&mut case_state.row, elapsed) && !recorded_inside_case {
                     recorded_inside_job = true;
-                    self.failures.push(RecordedFailure {
+                    aborted_failures.push(RecordedFailure {
                         job_id: job_id.clone(),
                         case_id: Some(case_id.clone()),
                         step_id: None,
@@ -248,7 +302,7 @@ impl RunState {
                 }
             }
             if abort_row(&mut job.row, elapsed) && !recorded_inside_job {
-                self.failures.push(RecordedFailure {
+                aborted_failures.push(RecordedFailure {
                     job_id,
                     case_id: None,
                     step_id: None,
@@ -256,13 +310,27 @@ impl RunState {
                 });
             }
         }
+        for failure in aborted_failures {
+            self.record_failure(failure);
+        }
         &self.snapshot
+    }
+
+    fn record_failure(&mut self, failure: RecordedFailure) {
+        self.failed_jobs.insert(failure.job_id.clone());
+        if let Some(case_id) = &failure.case_id {
+            self.failed_cases
+                .insert((failure.job_id.clone(), case_id.clone()));
+        }
+        if self.failures.len() < MAX_RECORDED_FAILURES {
+            self.failures.push(failure);
+        }
     }
 
     fn advance_clock(&mut self, next_ms: u64) -> Result<(), ProtocolError> {
         if next_ms < self.snapshot.elapsed_ms {
             return Err(ProtocolError::new(format!(
-                "El reloj retrocedió de {} ms a {next_ms} ms",
+                "Clock moved backwards from {} ms to {next_ms} ms",
                 self.snapshot.elapsed_ms
             )));
         }
@@ -272,21 +340,18 @@ impl RunState {
 
     fn start_job(&mut self, job_id: &str, at_ms: u64) -> Result<(), ProtocolError> {
         self.ensure_clock_non_decreasing(at_ms)?;
-        let dependencies: Vec<String> = self
-            .snapshot
-            .definition()
-            .jobs()
-            .find(|job| job.id == job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?
-            .dependencies
-            .clone();
-        for dependency in &dependencies {
-            let status = self.snapshot.job_status(dependency).ok_or_else(|| {
-                ProtocolError::new(format!("Dependencia desconocida: {dependency:?}"))
-            })?;
+        let &(col_idx, job_idx) = self
+            .job_locations
+            .get(job_id)
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
+        for dependency in &self.snapshot.definition().columns[col_idx].jobs[job_idx].dependencies {
+            let status = self
+                .snapshot
+                .job_status(dependency)
+                .ok_or_else(|| ProtocolError::new(format!("Unknown dependency: {dependency:?}")))?;
             if matches!(status, Status::Pending | Status::Running) {
                 return Err(ProtocolError::new(format!(
-                    "El job {job_id:?} no puede iniciar antes de que termine {dependency:?}"
+                    "Job {job_id:?} cannot start before dependency {dependency:?} finishes"
                 )));
             }
         }
@@ -294,10 +359,10 @@ impl RunState {
             .snapshot
             .jobs_mut()
             .get_mut(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         if job.row.status != Status::Pending {
             return Err(ProtocolError::new(format!(
-                "El job {job_id:?} ya fue iniciado o finalizado"
+                "Job {job_id:?} has already been started or finished"
             )));
         }
         job.row = Row {
@@ -317,35 +382,40 @@ impl RunState {
         at_ms: u64,
     ) -> Result<(), ProtocolError> {
         self.ensure_clock_non_decreasing(at_ms)?;
-        validate_identifier(case_id, "caso")?;
+        validate_identifier(case_id, "case")?;
+        let &(col_idx, job_idx) = self
+            .job_locations
+            .get(job_id)
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         let job_state = self
             .snapshot
             .jobs()
             .get(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         if job_state.row.status != Status::Running {
             return Err(ProtocolError::new(format!(
-                "No se puede iniciar el caso {case_id:?}: el job {job_id:?} no está en ejecución"
+                "Cannot start case {case_id:?}: job {job_id:?} is not running"
             )));
         }
 
-        if let Some(existing_case) = job_state.cases.get(case_id) {
+        let case_key = (job_id.to_owned(), case_id.to_owned());
+        if let Some(&case_idx) = self.case_locations.get(&case_key) {
+            let existing_case = job_state.cases.get(case_id).ok_or_else(|| {
+                ProtocolError::new(format!("Unknown case {case_id:?} in {job_id:?}"))
+            })?;
             if existing_case.row.status != Status::Pending {
                 return Err(ProtocolError::new(format!(
-                    "El caso {case_id:?} en {job_id:?} ya fue iniciado o finalizado"
+                    "Case {case_id:?} in {job_id:?} has already been started or finished"
                 )));
             }
             if let Some(provided_title) = title.as_deref() {
-                let expected_title = self
-                    .snapshot
-                    .definition()
-                    .jobs()
-                    .find(|job| job.id == job_id)
-                    .and_then(|job| job.cases.iter().find(|case| case.id == case_id))
-                    .map(|case| case.title.as_str());
-                if expected_title != Some(provided_title) {
+                let expected_title = self.snapshot.definition().columns[col_idx].jobs[job_idx]
+                    .cases[case_idx]
+                    .title
+                    .as_str();
+                if expected_title != provided_title {
                     return Err(ProtocolError::new(format!(
-                        "El título del caso {case_id:?} no coincide con la definición"
+                        "Title for case {case_id:?} does not match definition"
                     )));
                 }
             }
@@ -353,10 +423,10 @@ impl RunState {
                 .snapshot
                 .jobs_mut()
                 .get_mut(job_id)
-                .expect("checked job")
-                .cases
-                .get_mut(case_id)
-                .expect("checked case");
+                .and_then(|job| job.cases.get_mut(case_id))
+                .ok_or_else(|| {
+                    ProtocolError::new(format!("Unknown case {case_id:?} in {job_id:?}"))
+                })?;
             case_state.row = Row {
                 status: Status::Running,
                 started_ms: Some(at_ms),
@@ -365,39 +435,48 @@ impl RunState {
         } else {
             let title = title.ok_or_else(|| {
                 ProtocolError::new(format!(
-                    "El caso dinámico {case_id:?} en {job_id:?} requiere title"
+                    "Dynamic case {case_id:?} in {job_id:?} requires a title"
                 ))
             })?;
             validate_label(case_id, &title)?;
-            let def_job = self
-                .snapshot
-                .definition_mut()
-                .columns
-                .iter_mut()
-                .flat_map(|column| &mut column.jobs)
-                .find(|job| job.id == job_id)
-                .expect("checked job definition");
+            let job_case_count = self.snapshot.definition().columns[col_idx].jobs[job_idx]
+                .cases
+                .len();
+            if job_case_count >= MAX_CASES_PER_JOB {
+                return Err(ProtocolError::new(format!(
+                    "Job {job_id:?} exceeds maximum of {MAX_CASES_PER_JOB} cases"
+                )));
+            }
+            if self.total_cases >= MAX_TOTAL_CASES {
+                return Err(ProtocolError::new(format!(
+                    "Pipeline run exceeds maximum of {MAX_TOTAL_CASES} total cases"
+                )));
+            }
+            let def_job = &mut self.snapshot.definition_mut().columns[col_idx].jobs[job_idx];
+            let new_case_idx = def_job.cases.len();
             def_job.cases.push(Case {
                 id: case_id.to_owned(),
                 title,
                 steps: Vec::new(),
             });
-            self.snapshot
+            let job_state = self
+                .snapshot
                 .jobs_mut()
                 .get_mut(job_id)
-                .expect("checked job")
-                .cases
-                .insert(
-                    case_id.to_owned(),
-                    CaseState {
-                        row: Row {
-                            status: Status::Running,
-                            started_ms: Some(at_ms),
-                            duration_ms: None,
-                        },
-                        steps: BTreeMap::new(),
+                .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
+            job_state.cases.insert(
+                case_id.to_owned(),
+                CaseState {
+                    row: Row {
+                        status: Status::Running,
+                        started_ms: Some(at_ms),
+                        duration_ms: None,
                     },
-                );
+                    steps: BTreeMap::new(),
+                },
+            );
+            self.case_locations.insert(case_key, new_case_idx);
+            self.total_cases += 1;
         }
         self.snapshot.elapsed_ms = at_ms;
         Ok(())
@@ -412,41 +491,28 @@ impl RunState {
         at_ms: u64,
     ) -> Result<(), ProtocolError> {
         self.ensure_clock_non_decreasing(at_ms)?;
-        validate_identifier(step_id, "paso")?;
+        validate_identifier(step_id, "step")?;
         self.ensure_container_running(job_id, case_id)?;
-
-        // Steps inside the same job or case must not overlap.
-        let has_running_step = match case_id {
-            Some(case_id) => self
-                .snapshot
-                .jobs()
-                .get(job_id)
-                .and_then(|job| job.cases.get(case_id))
-                .is_some_and(|case| case.steps.values().any(|row| row.status == Status::Running)),
-            None => self
-                .snapshot
-                .jobs()
-                .get(job_id)
-                .is_some_and(|job| job.steps.values().any(|row| row.status == Status::Running)),
-        };
-        if has_running_step {
-            return Err(ProtocolError::new(format!(
-                "Ya hay un paso en ejecución dentro de {job_id:?}"
-            )));
-        }
 
         let scope = StepScope {
             job_id: job_id.to_owned(),
             case_id: case_id.map(str::to_owned),
         };
-        let existing_index = self.find_defined_step_index(job_id, case_id, step_id);
+        // Steps inside the same job or case must not overlap.
+        if self.running_steps.contains(&scope) {
+            return Err(ProtocolError::new(format!(
+                "Another step is already running inside {job_id:?}"
+            )));
+        }
+
+        let existing_index = self.find_defined_step_index(&scope, step_id);
 
         if let Some((index, expected_title)) = existing_index {
             if let Some(provided) = title.as_deref()
                 && provided != expected_title
             {
                 return Err(ProtocolError::new(format!(
-                    "El título del paso {step_id:?} no coincide con la definición"
+                    "Title for step {step_id:?} does not match definition"
                 )));
             }
             if self
@@ -455,13 +521,13 @@ impl RunState {
                 .is_some_and(|&previous| index <= previous)
             {
                 return Err(ProtocolError::new(format!(
-                    "El paso {step_id:?} está fuera del orden definido"
+                    "Step {step_id:?} is out of defined order"
                 )));
             }
             let row = self.step_row_mut(job_id, case_id, step_id)?;
             if row.status != Status::Pending {
                 return Err(ProtocolError::new(format!(
-                    "El paso {step_id:?} ya fue iniciado o finalizado"
+                    "Step {step_id:?} has already been started or finished"
                 )));
             }
             *row = Row {
@@ -469,13 +535,14 @@ impl RunState {
                 started_ms: Some(at_ms),
                 duration_ms: None,
             };
-            self.last_step_index.insert(scope, index);
+            self.last_step_index.insert(scope.clone(), index);
+            self.running_steps.insert(scope);
         } else {
             let title = title.ok_or_else(|| {
-                ProtocolError::new(format!("El paso dinámico {step_id:?} requiere title"))
+                ProtocolError::new(format!("Dynamic step {step_id:?} requires a title"))
             })?;
             validate_label(step_id, &title)?;
-            let new_index = self.append_dynamic_step(job_id, case_id, step_id, title)?;
+            let new_index = self.append_dynamic_step(&scope, step_id, title)?;
             let steps_map = self.steps_map_mut(job_id, case_id)?;
             steps_map.insert(
                 step_id.to_owned(),
@@ -485,7 +552,11 @@ impl RunState {
                     duration_ms: None,
                 },
             );
-            self.last_step_index.insert(scope, new_index);
+            self.step_locations
+                .insert((scope.clone(), step_id.to_owned()), new_index);
+            self.last_step_index.insert(scope.clone(), new_index);
+            self.running_steps.insert(scope);
+            self.total_steps += 1;
         }
 
         self.snapshot.elapsed_ms = at_ms;
@@ -507,8 +578,14 @@ impl RunState {
 
         let row = self.step_row_mut(job_id, case_id, step_id)?;
         complete_row(row, status, at_ms, step_id)?;
+        if status != TerminalStatus::Skipped {
+            self.running_steps.remove(&StepScope {
+                job_id: job_id.to_owned(),
+                case_id: case_id.map(str::to_owned),
+            });
+        }
         if status == TerminalStatus::Failed {
-            self.failures.push(RecordedFailure {
+            self.record_failure(RecordedFailure {
                 job_id: job_id.to_owned(),
                 case_id: case_id.map(str::to_owned),
                 step_id: Some(step_id.to_owned()),
@@ -529,29 +606,34 @@ impl RunState {
     ) -> Result<(), ProtocolError> {
         self.ensure_clock_non_decreasing(at_ms)?;
         validate_failure_kind(status, kind)?;
+        let case_scope = StepScope {
+            job_id: job_id.to_owned(),
+            case_id: Some(case_id.to_owned()),
+        };
+        if self.running_steps.contains(&case_scope) {
+            return Err(ProtocolError::new(format!(
+                "Case {case_id:?} still has a running step"
+            )));
+        }
         let job = self
             .snapshot
             .jobs_mut()
             .get_mut(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         if job.row.status != Status::Running {
             return Err(ProtocolError::new(format!(
-                "No se puede finalizar el caso {case_id:?}: el job {job_id:?} no está en ejecución"
+                "Cannot finish case {case_id:?}: job {job_id:?} is not running"
             )));
         }
-        let case = job.cases.get_mut(case_id).ok_or_else(|| {
-            ProtocolError::new(format!("Caso desconocido {case_id:?} en {job_id:?}"))
-        })?;
-        if case.steps.values().any(|row| row.status == Status::Running) {
-            return Err(ProtocolError::new(format!(
-                "El caso {case_id:?} aún tiene un paso en ejecución"
-            )));
-        }
+        let case = job
+            .cases
+            .get_mut(case_id)
+            .ok_or_else(|| ProtocolError::new(format!("Unknown case {case_id:?} in {job_id:?}")))?;
         if status == TerminalStatus::Passed
             && case.steps.values().any(|row| row.status == Status::Failed)
         {
             return Err(ProtocolError::new(format!(
-                "El caso {case_id:?} no puede aprobarse si tiene pasos fallidos"
+                "Case {case_id:?} cannot pass when it has failed steps"
             )));
         }
         complete_row(&mut case.row, status, at_ms, case_id)?;
@@ -559,12 +641,9 @@ impl RunState {
             step_row.status.skip_if_pending();
         }
         if status == TerminalStatus::Failed {
-            let has_step_failure = self
-                .failures
-                .iter()
-                .any(|entry| entry.job_id == job_id && entry.case_id.as_deref() == Some(case_id));
-            if !has_step_failure {
-                self.failures.push(RecordedFailure {
+            let key = (job_id.to_owned(), case_id.to_owned());
+            if !self.failed_cases.contains(&key) {
+                self.record_failure(RecordedFailure {
                     job_id: job_id.to_owned(),
                     case_id: Some(case_id.to_owned()),
                     step_id: None,
@@ -583,19 +662,24 @@ impl RunState {
         at_ms: u64,
     ) -> Result<(), ProtocolError> {
         self.ensure_clock_non_decreasing(at_ms)?;
+        let job_scope = StepScope {
+            job_id: job_id.to_owned(),
+            case_id: None,
+        };
+        let has_running_direct_step = self.running_steps.contains(&job_scope);
         let job = self
             .snapshot
             .jobs_mut()
             .get_mut(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
-        let has_running_child = job.steps.values().any(|row| row.status == Status::Running)
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
+        let has_running_child = has_running_direct_step
             || job
                 .cases
                 .values()
                 .any(|case| case.row.status == Status::Running);
         if has_running_child {
             return Err(ProtocolError::new(format!(
-                "El job {job_id:?} aún tiene pasos o casos en ejecución"
+                "Job {job_id:?} still has running steps or cases"
             )));
         }
         let has_failed_child = job.steps.values().any(|row| row.status == Status::Failed)
@@ -605,7 +689,7 @@ impl RunState {
                 .any(|case| case.row.status == Status::Failed);
         if status == TerminalStatus::Passed && has_failed_child {
             return Err(ProtocolError::new(format!(
-                "El job {job_id:?} no puede aprobarse con pasos o casos fallidos"
+                "Job {job_id:?} cannot pass when it has failed steps or cases"
             )));
         }
         complete_row(&mut job.row, status, at_ms, job_id)?;
@@ -618,16 +702,13 @@ impl RunState {
                 step_row.status.skip_if_pending();
             }
         }
-        if status == TerminalStatus::Failed {
-            let has_child_failure = self.failures.iter().any(|entry| entry.job_id == job_id);
-            if !has_child_failure {
-                self.failures.push(RecordedFailure {
-                    job_id: job_id.to_owned(),
-                    case_id: None,
-                    step_id: None,
-                    kind: FailureKind::Execution,
-                });
-            }
+        if status == TerminalStatus::Failed && !self.failed_jobs.contains(job_id) {
+            self.record_failure(RecordedFailure {
+                job_id: job_id.to_owned(),
+                case_id: None,
+                step_id: None,
+                kind: FailureKind::Execution,
+            });
         }
         self.snapshot.elapsed_ms = at_ms;
         Ok(())
@@ -642,7 +723,7 @@ impl RunState {
             .any(|job| job.row.status == Status::Running)
         {
             return Err(ProtocolError::new(
-                "No se puede finalizar la ejecución mientras haya jobs en curso",
+                "Cannot finish run while jobs are still running",
             ));
         }
         if outcome == RunOutcome::Passed
@@ -653,7 +734,7 @@ impl RunState {
                 .any(|job| job.row.status == Status::Failed)
         {
             return Err(ProtocolError::new(
-                "La ejecución no puede aprobarse si algún job falló",
+                "Run cannot pass when any job has failed",
             ));
         }
         for job in self.snapshot.jobs_mut().values_mut() {
@@ -676,7 +757,7 @@ impl RunState {
     fn ensure_clock_non_decreasing(&self, at_ms: u64) -> Result<(), ProtocolError> {
         if at_ms < self.snapshot.elapsed_ms {
             return Err(ProtocolError::new(format!(
-                "El reloj retrocedió de {} ms a {at_ms} ms",
+                "Clock moved backwards from {} ms to {at_ms} ms",
                 self.snapshot.elapsed_ms
             )));
         }
@@ -692,75 +773,81 @@ impl RunState {
             .snapshot
             .jobs()
             .get(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         if job.row.status != Status::Running {
-            return Err(ProtocolError::new(format!(
-                "El job {job_id:?} no está en ejecución"
-            )));
+            return Err(ProtocolError::new(format!("Job {job_id:?} is not running")));
         }
         if let Some(case_id) = case_id {
             let case = job.cases.get(case_id).ok_or_else(|| {
-                ProtocolError::new(format!("Caso desconocido {case_id:?} en {job_id:?}"))
+                ProtocolError::new(format!("Unknown case {case_id:?} in {job_id:?}"))
             })?;
             if case.row.status != Status::Running {
                 return Err(ProtocolError::new(format!(
-                    "El caso {case_id:?} en {job_id:?} no está en ejecución"
+                    "Case {case_id:?} in {job_id:?} is not running"
                 )));
             }
         }
         Ok(())
     }
 
-    fn find_defined_step_index(
-        &self,
-        job_id: &str,
-        case_id: Option<&str>,
-        step_id: &str,
-    ) -> Option<(usize, &str)> {
-        let job = self
-            .snapshot
-            .definition()
-            .jobs()
-            .find(|job| job.id == job_id)?;
-        let steps = match case_id {
-            Some(case_id) => &job.cases.iter().find(|case| case.id == case_id)?.steps,
-            None => &job.steps,
+    fn find_defined_step_index(&self, scope: &StepScope, step_id: &str) -> Option<(usize, &str)> {
+        let &step_idx = self
+            .step_locations
+            .get(&(scope.clone(), step_id.to_owned()))?;
+        let &(col_idx, job_idx) = self.job_locations.get(&scope.job_id)?;
+        let job = &self.snapshot.definition().columns[col_idx].jobs[job_idx];
+        let step = match scope.case_id.as_deref() {
+            Some(case_id) => {
+                let &case_idx = self
+                    .case_locations
+                    .get(&(scope.job_id.clone(), case_id.to_owned()))?;
+                job.cases.get(case_idx)?.steps.get(step_idx)?
+            }
+            None => job.steps.get(step_idx)?,
         };
-        steps
-            .iter()
-            .enumerate()
-            .find(|(_, step)| step.id == step_id)
-            .map(|(index, step)| (index, step.title.as_str()))
+        Some((step_idx, step.title.as_str()))
     }
 
     fn append_dynamic_step(
         &mut self,
-        job_id: &str,
-        case_id: Option<&str>,
+        scope: &StepScope,
         step_id: &str,
         title: String,
     ) -> Result<usize, ProtocolError> {
-        let job = self
-            .snapshot
-            .definition_mut()
-            .columns
-            .iter_mut()
-            .flat_map(|column| &mut column.jobs)
-            .find(|job| job.id == job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
-        let steps = match case_id {
-            Some(case_id) => {
-                &mut job
-                    .cases
-                    .iter_mut()
-                    .find(|case| case.id == case_id)
+        if self.total_steps >= MAX_TOTAL_STEPS {
+            return Err(ProtocolError::new(format!(
+                "Pipeline run exceeds maximum of {MAX_TOTAL_STEPS} total steps"
+            )));
+        }
+        let &(col_idx, job_idx) = self
+            .job_locations
+            .get(&scope.job_id)
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {:?}", scope.job_id)))?;
+        let case_idx = match scope.case_id.as_deref() {
+            Some(case_id) => Some(
+                *self
+                    .case_locations
+                    .get(&(scope.job_id.clone(), case_id.to_owned()))
                     .ok_or_else(|| {
-                        ProtocolError::new(format!("Caso desconocido {case_id:?} en {job_id:?}"))
-                    })?
-                    .steps
-            }
+                        ProtocolError::new(format!(
+                            "Unknown case {case_id:?} in {:?}",
+                            scope.job_id
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        let job = &mut self.snapshot.definition_mut().columns[col_idx].jobs[job_idx];
+        let steps = match case_idx {
+            Some(idx) => &mut job.cases[idx].steps,
             None => &mut job.steps,
         };
+        if steps.len() >= MAX_STEPS_PER_CONTAINER {
+            let container = scope.case_id.as_deref().unwrap_or(scope.job_id.as_str());
+            return Err(ProtocolError::new(format!(
+                "Container {container:?} exceeds maximum of {MAX_STEPS_PER_CONTAINER} steps"
+            )));
+        }
         let index = steps.len();
         steps.push(Step {
             id: step_id.to_owned(),
@@ -778,13 +865,13 @@ impl RunState {
             .snapshot
             .jobs_mut()
             .get_mut(job_id)
-            .ok_or_else(|| ProtocolError::new(format!("Job desconocido: {job_id:?}")))?;
+            .ok_or_else(|| ProtocolError::new(format!("Unknown job: {job_id:?}")))?;
         match case_id {
             Some(case_id) => Ok(&mut job
                 .cases
                 .get_mut(case_id)
                 .ok_or_else(|| {
-                    ProtocolError::new(format!("Caso desconocido {case_id:?} en {job_id:?}"))
+                    ProtocolError::new(format!("Unknown case {case_id:?} in {job_id:?}"))
                 })?
                 .steps),
             None => Ok(&mut job.steps),
@@ -799,15 +886,13 @@ impl RunState {
     ) -> Result<&mut Row, ProtocolError> {
         self.steps_map_mut(job_id, case_id)?
             .get_mut(step_id)
-            .ok_or_else(|| ProtocolError::new(format!("Paso desconocido: {step_id:?}")))
+            .ok_or_else(|| ProtocolError::new(format!("Unknown step: {step_id:?}")))
     }
 }
 
 fn validate_identifier(id: &str, kind: &str) -> Result<(), ProtocolError> {
-    if !valid_id(id) || id.len() > crate::limits::MAX_ID_BYTES {
-        return Err(ProtocolError::new(format!(
-            "ID de {kind} no válido: {id:?}"
-        )));
+    if !valid_id(id) || id.len() > MAX_ID_BYTES {
+        return Err(ProtocolError::new(format!("Invalid {kind} ID: {id:?}")));
     }
     Ok(())
 }
@@ -818,7 +903,7 @@ fn validate_failure_kind(
 ) -> Result<(), ProtocolError> {
     if status != TerminalStatus::Failed && kind.is_some() {
         return Err(ProtocolError::new(
-            "FailureKind solo es válido cuando el estado es failed",
+            "FailureKind is only valid when status is failed",
         ));
     }
     Ok(())
@@ -834,7 +919,7 @@ fn complete_row(
         TerminalStatus::Skipped => {
             if row.status != Status::Pending {
                 return Err(ProtocolError::new(format!(
-                    "Solo una fila pendiente puede marcarse como skipped ({id:?})"
+                    "Only a pending row can be marked skipped ({id:?})"
                 )));
             }
             row.status = Status::Skipped;
@@ -843,15 +928,15 @@ fn complete_row(
         TerminalStatus::Passed | TerminalStatus::Failed => {
             if row.status != Status::Running {
                 return Err(ProtocolError::new(format!(
-                    "No se puede finalizar {id:?} porque no está en ejecución"
+                    "Cannot finish {id:?} because it is not running"
                 )));
             }
             let started = row
                 .started_ms
-                .ok_or_else(|| ProtocolError::new(format!("Falta started_ms en {id:?}")))?;
+                .ok_or_else(|| ProtocolError::new(format!("Missing started_ms on {id:?}")))?;
             if at_ms < started {
                 return Err(ProtocolError::new(format!(
-                    "Fin anterior al inicio en {id:?}"
+                    "Finish timestamp precedes start timestamp on {id:?}"
                 )));
             }
             row.status = status.into();
@@ -1329,5 +1414,225 @@ mod tests {
                 .map(|row| (row.status, row.duration_ms)),
             Some((Status::Passed, Some(20)))
         );
+    }
+
+    #[test]
+    fn enforces_dynamic_case_step_and_failure_quotas() {
+        // 1) Dynamic cases per job and total cases quotas.
+        let jobs_for_total_cases = (MAX_TOTAL_CASES / MAX_CASES_PER_JOB) + 1;
+        let case_def = Definition {
+            title: "Case quota".into(),
+            description: "Tests dynamic case limits".into(),
+            columns: vec![Column {
+                title: "Verify".into(),
+                jobs: (0..jobs_for_total_cases)
+                    .map(|j| Job {
+                        id: format!("j-{j}"),
+                        title: format!("Job {j}"),
+                        is_test: true,
+                        dependencies: vec![],
+                        steps: vec![],
+                        cases: vec![],
+                    })
+                    .collect(),
+            }],
+        };
+        let mut state = RunState::start(Event::RunStarted {
+            schema_version: SCHEMA_VERSION,
+            definition: case_def,
+            workers: Some(1),
+        })
+        .unwrap();
+
+        let mut clock = 0u64;
+        for j in 0..jobs_for_total_cases {
+            let job_id = format!("j-{j}");
+            state
+                .apply(Event::JobStarted {
+                    job_id: job_id.clone(),
+                    at_ms: clock,
+                })
+                .unwrap();
+            let is_last_job = j + 1 == jobs_for_total_cases;
+            if !is_last_job {
+                for c in 0..MAX_CASES_PER_JOB {
+                    let case_id = format!("c-{c}");
+                    state
+                        .apply(Event::CaseStarted {
+                            job_id: job_id.clone(),
+                            case_id: case_id.clone(),
+                            title: Some(format!("Case {c}")),
+                            at_ms: clock,
+                        })
+                        .unwrap();
+                    clock += 1;
+                    state
+                        .apply(Event::CaseFinished {
+                            job_id: job_id.clone(),
+                            case_id,
+                            status: TerminalStatus::Failed,
+                            at_ms: clock,
+                            kind: Some(FailureKind::Assertion),
+                        })
+                        .unwrap();
+                }
+                // Exceeding MAX_CASES_PER_JOB on job 0 must fail.
+                if j == 0 {
+                    assert!(
+                        state
+                            .apply(Event::CaseStarted {
+                                job_id: job_id.clone(),
+                                case_id: "overflow-case".into(),
+                                title: Some("Overflow".into()),
+                                at_ms: clock,
+                            })
+                            .is_err()
+                    );
+                }
+                state
+                    .apply(Event::JobFinished {
+                        job_id,
+                        status: TerminalStatus::Failed,
+                        at_ms: clock,
+                    })
+                    .unwrap();
+            } else {
+                // Total cases across all prior jobs already equals MAX_TOTAL_CASES.
+                assert!(
+                    state
+                        .apply(Event::CaseStarted {
+                            job_id: job_id.clone(),
+                            case_id: "total-overflow".into(),
+                            title: Some("Total overflow".into()),
+                            at_ms: clock,
+                        })
+                        .is_err()
+                );
+                state
+                    .apply(Event::JobFinished {
+                        job_id,
+                        status: TerminalStatus::Passed,
+                        at_ms: clock,
+                    })
+                    .unwrap();
+            }
+        }
+        // Recorded failures are capped at MAX_RECORDED_FAILURES while run still fails.
+        assert_eq!(state.failures().len(), MAX_RECORDED_FAILURES);
+        state
+            .apply(Event::RunFinished {
+                status: RunOutcome::Failed,
+                elapsed_ms: clock,
+            })
+            .unwrap();
+        assert_eq!(state.snapshot().status, Status::Failed);
+
+        // 2) Dynamic steps per container and total steps quotas.
+        let jobs_for_total_steps = (MAX_TOTAL_STEPS / MAX_STEPS_PER_CONTAINER) + 1;
+        let step_def = Definition {
+            title: "Step quota".into(),
+            description: "Tests dynamic step limits".into(),
+            columns: vec![Column {
+                title: "Verify".into(),
+                jobs: (0..jobs_for_total_steps)
+                    .map(|j| Job {
+                        id: format!("j-{j}"),
+                        title: format!("Job {j}"),
+                        is_test: true,
+                        dependencies: vec![],
+                        steps: vec![],
+                        cases: vec![],
+                    })
+                    .collect(),
+            }],
+        };
+        let mut step_state = RunState::start(Event::RunStarted {
+            schema_version: SCHEMA_VERSION,
+            definition: step_def,
+            workers: Some(1),
+        })
+        .unwrap();
+        let mut step_clock = 0u64;
+        for j in 0..jobs_for_total_steps {
+            let job_id = format!("j-{j}");
+            step_state
+                .apply(Event::JobStarted {
+                    job_id: job_id.clone(),
+                    at_ms: step_clock,
+                })
+                .unwrap();
+            let is_last_job = j + 1 == jobs_for_total_steps;
+            if !is_last_job {
+                for s in 0..MAX_STEPS_PER_CONTAINER {
+                    let step_id = format!("s-{s}");
+                    step_state
+                        .apply(Event::StepStarted {
+                            job_id: job_id.clone(),
+                            case_id: None,
+                            step_id: step_id.clone(),
+                            title: Some(format!("Step {s}")),
+                            at_ms: step_clock,
+                        })
+                        .unwrap();
+                    step_clock += 1;
+                    step_state
+                        .apply(Event::StepFinished {
+                            job_id: job_id.clone(),
+                            case_id: None,
+                            step_id,
+                            status: TerminalStatus::Passed,
+                            at_ms: step_clock,
+                            kind: None,
+                        })
+                        .unwrap();
+                }
+                if j == 0 {
+                    assert!(
+                        step_state
+                            .apply(Event::StepStarted {
+                                job_id: job_id.clone(),
+                                case_id: None,
+                                step_id: "overflow-step".into(),
+                                title: Some("Overflow".into()),
+                                at_ms: step_clock,
+                            })
+                            .is_err()
+                    );
+                }
+                step_state
+                    .apply(Event::JobFinished {
+                        job_id,
+                        status: TerminalStatus::Passed,
+                        at_ms: step_clock,
+                    })
+                    .unwrap();
+            } else {
+                assert!(
+                    step_state
+                        .apply(Event::StepStarted {
+                            job_id: job_id.clone(),
+                            case_id: None,
+                            step_id: "total-overflow-step".into(),
+                            title: Some("Total overflow".into()),
+                            at_ms: step_clock,
+                        })
+                        .is_err()
+                );
+                step_state
+                    .apply(Event::JobFinished {
+                        job_id,
+                        status: TerminalStatus::Passed,
+                        at_ms: step_clock,
+                    })
+                    .unwrap();
+            }
+        }
+        step_state
+            .apply(Event::RunFinished {
+                status: RunOutcome::Passed,
+                elapsed_ms: step_clock,
+            })
+            .unwrap();
+        assert_eq!(step_state.snapshot().status, Status::Passed);
     }
 }

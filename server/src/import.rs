@@ -213,22 +213,24 @@ fn decode_v1(record: RecordedRun) -> RunResult<(Snapshot, Vec<Failure>)> {
             }],
         }],
     };
-    let mut snapshot = Snapshot::new(definition)?;
     let status = Status::completed(failures.is_empty());
-    snapshot.status = status;
-    snapshot.elapsed_ms = elapsed_ms;
-    *snapshot.jobs_mut() = BTreeMap::from([(
-        job_id,
-        JobState {
-            row: Row {
-                status,
-                started_ms: Some(0),
-                duration_ms: Some(elapsed_ms),
+    let snapshot = Snapshot::from_parts(
+        definition,
+        status,
+        elapsed_ms,
+        BTreeMap::from([(
+            job_id,
+            JobState {
+                row: Row {
+                    status,
+                    started_ms: Some(0),
+                    duration_ms: Some(elapsed_ms),
+                },
+                steps: recorded_steps,
+                cases: BTreeMap::new(),
             },
-            steps: recorded_steps,
-            cases: BTreeMap::new(),
-        },
-    )]);
+        )]),
+    )?;
     Ok((snapshot, failures))
 }
 
