@@ -108,7 +108,8 @@ jobs:
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --locked check
+          command: check
+          arguments: --locked
 
   windows-unit:
     name: Build and tests (Windows Named Pipes)
