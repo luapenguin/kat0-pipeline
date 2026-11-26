@@ -38,6 +38,18 @@ impl Bundle {
         Ok(self.render_json(&serde_json::to_string(snapshot)?, live))
     }
 
+    pub(crate) fn render_json(&self, json: &str, live: bool) -> String {
+        // Prevent JSON values from terminating (or changing the parsing of) the script element.
+        let json = json.replace('<', "\\u003c");
+        let mut html = String::with_capacity(self.html.len() + json.len());
+        html.push_str(&self.html[..self.live_at]);
+        html.push_str(if live { "true" } else { "false" });
+        html.push_str(&self.html[self.live_at + "false".len()..self.snapshot_at]);
+        html.push_str(&json);
+        html.push_str(&self.html[self.snapshot_at + SNAPSHOT_SLOT.len()..]);
+        html
+    }
+
     /// Publishes a complete offline report at a new path, without replacing a file.
     pub async fn save(&self, snapshot: &Snapshot, path: &Path) -> RunResult {
         let html = self.render(snapshot, false)?;
@@ -65,25 +77,13 @@ impl Bundle {
         let snapshot_at = unique_offset(&html, &format!("{DATA_TAG}{SNAPSHOT_SLOT}{SCRIPT_END}"))?
             + DATA_TAG.len();
         if live_at + "false".len() > snapshot_at {
-            return Err("#panel debe preceder al bloque #run-data".into());
+            return Err("#panel must precede #run-data".into());
         }
         Ok(Self {
             html,
             live_at,
             snapshot_at,
         })
-    }
-
-    fn render_json(&self, json: &str, live: bool) -> String {
-        // Prevent JSON values from terminating (or changing the parsing of) the script element.
-        let json = json.replace('<', "\\u003c");
-        let mut html = String::with_capacity(self.html.len() + json.len());
-        html.push_str(&self.html[..self.live_at]);
-        html.push_str(if live { "true" } else { "false" });
-        html.push_str(&self.html[self.live_at + "false".len()..self.snapshot_at]);
-        html.push_str(&json);
-        html.push_str(&self.html[self.snapshot_at + SNAPSHOT_SLOT.len()..]);
-        html
     }
 }
 
@@ -117,9 +117,9 @@ fn unique_offset(text: &str, marker: &str) -> RunResult<usize> {
     let mut matches = text.match_indices(marker);
     match (matches.next(), matches.next()) {
         (Some((offset, _)), None) => Ok(offset),
-        _ => Err(
-            format!("Se esperaba una sola aparición de {marker:?} al empaquetar el informe").into(),
-        ),
+        _ => {
+            Err(format!("Expected a single occurrence of {marker:?} while bundling report").into())
+        }
     }
 }
 
@@ -137,7 +137,9 @@ fn data_url(mime: &str, bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kat0_pipeline_protocol::model::{Column, Definition, Job, Row, Status};
+    use std::collections::BTreeMap;
+
+    use kat0_pipeline_protocol::model::{Column, Definition, Job, JobState, Row, Status};
     use tokio::fs;
 
     use super::*;
@@ -233,13 +235,25 @@ mod tests {
     #[tokio::test]
     async fn publishes_complete_offline_html_for_a_failed_execution() {
         let bundle = Bundle::from_assets(TEMPLATE, b"js", b"\0asm", b"css").unwrap();
-        let mut snapshot = snapshot("Failed run");
-        snapshot.status = Status::Failed;
-        snapshot.jobs_mut().get_mut("check").unwrap().row = Row {
-            status: Status::Failed,
-            started_ms: Some(0),
-            duration_ms: Some(0),
-        };
+        let definition = snapshot("Failed run").definition().clone();
+        let snapshot = Snapshot::from_parts(
+            definition,
+            Status::Failed,
+            0,
+            BTreeMap::from([(
+                "check".into(),
+                JobState {
+                    row: Row {
+                        status: Status::Failed,
+                        started_ms: Some(0),
+                        duration_ms: Some(0),
+                    },
+                    steps: BTreeMap::new(),
+                    cases: BTreeMap::new(),
+                },
+            )]),
+        )
+        .unwrap();
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("run");
         let path = dir.join("index.html");

@@ -2,7 +2,7 @@
 
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
-use kat0_pipeline::{
+use crate::{
     RunResult,
     runner::{self, RunOptions},
     ui::{UiMode, browser::DEFAULT_GRACE_PERIOD},
@@ -131,8 +131,7 @@ pub(super) async fn execute(parsed: RunCommand) -> RunResult {
         options.open_browser = false;
     }
     options.browser_grace = parsed.grace;
-    let _artifacts = runner::execute(options).await?;
-    Ok(())
+    runner::execute(options).await
 }
 
 #[cfg(test)]

@@ -112,7 +112,7 @@ pub fn verify(rebuild: bool) -> TaskResult {
     let assets_dir = server_assets_dir(&root);
     let manifest_bytes = fs::read(assets_dir.join(MANIFEST_FILE)).map_err(|error| {
         format!(
-            "Falta {}: {error}. Ejecuta `cargo run -p xtask -- build-panel`.",
+            "Missing {}: {error}. Run `cargo run -p xtask -- build-panel`.",
             assets_dir.join(MANIFEST_FILE).display()
         )
     })?;
@@ -137,8 +137,8 @@ pub fn verify(rebuild: bool) -> TaskResult {
                 }
             }
             return Err(format!(
-                "Los assets en server/assets/ no coinciden con la compilación actual de client/. \
-                 Ejecuta `cargo run -p xtask -- build-panel`.{details}"
+                "Assets in server/assets/ do not match the current build of client/. \
+                 Run `cargo run -p xtask -- build-panel`.{details}"
             )
             .into());
         }
@@ -158,32 +158,30 @@ pub fn verify(rebuild: bool) -> TaskResult {
 fn verify_manifest_on_disk(assets_dir: &Path, manifest: &AssetManifest) -> TaskResult {
     if manifest.schema_version != 1 {
         return Err(format!(
-            "Versión de manifest no admitida: {}",
+            "Unsupported manifest schema version: {}",
             manifest.schema_version
         )
         .into());
     }
     let expected_files = [PANEL_JS, PANEL_WASM, PANEL_CSS];
     if manifest.assets.len() != expected_files.len() {
-        return Err(
-            "El manifest debe contener exactamente panel.js, panel.wasm y report.css".into(),
-        );
+        return Err("Manifest must contain exactly panel.js, panel.wasm, and report.css".into());
     }
     let mut total = 0usize;
     for (entry, expected_name) in manifest.assets.iter().zip(expected_files) {
         if entry.file != expected_name {
             return Err(format!(
-                "Se esperaba {expected_name:?} en el manifest, pero apareció {:?}",
+                "Expected {expected_name:?} in manifest, found {:?}",
                 entry.file
             )
             .into());
         }
         let path = assets_dir.join(&entry.file);
         let bytes = fs::read(&path)
-            .map_err(|error| format!("No se pudo leer {}: {error}", path.display()))?;
+            .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
         if bytes.len() != entry.bytes {
             return Err(format!(
-                "Tamaño distinto para {}: esperado {}, actual {}",
+                "Size mismatch for {}: expected {}, got {}",
                 entry.file,
                 entry.bytes,
                 bytes.len()
@@ -193,7 +191,7 @@ fn verify_manifest_on_disk(assets_dir: &Path, manifest: &AssetManifest) -> TaskR
         let actual_hash = sha256::digest_hex(&bytes);
         if actual_hash != entry.sha256 {
             return Err(format!(
-                "SHA-256 distinto para {}: esperado {}, actual {actual_hash}",
+                "SHA-256 mismatch for {}: expected {}, got {actual_hash}",
                 entry.file, entry.sha256
             )
             .into());
@@ -202,7 +200,7 @@ fn verify_manifest_on_disk(assets_dir: &Path, manifest: &AssetManifest) -> TaskR
     }
     if total != manifest.total_bytes {
         return Err(format!(
-            "total_bytes del manifest ({}) no coincide con la suma real ({total})",
+            "Manifest total_bytes ({}) does not match actual sum ({total})",
             manifest.total_bytes
         )
         .into());
@@ -213,11 +211,11 @@ fn verify_manifest_on_disk(assets_dir: &Path, manifest: &AssetManifest) -> TaskR
 
 fn check_size_budget(total_bytes: usize) -> TaskResult {
     if total_bytes == 0 {
-        return Err("Los assets del panel no pueden estar vacíos".into());
+        return Err("Panel assets cannot be empty".into());
     }
     if total_bytes > MAX_TOTAL_ASSET_BYTES {
         return Err(format!(
-            "Los assets del panel ({total_bytes} bytes) superan el presupuesto máximo de {MAX_TOTAL_ASSET_BYTES} bytes"
+            "Panel assets ({total_bytes} bytes) exceed maximum budget of {MAX_TOTAL_ASSET_BYTES} bytes"
         )
         .into());
     }
@@ -234,7 +232,7 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
     let site_root = site
         .path()
         .to_str()
-        .ok_or("El directorio temporal para cargo-leptos debe usar UTF-8")?;
+        .ok_or("Temporary directory for cargo-leptos must be valid UTF-8")?;
 
     let mut command = Command::new("cargo");
     command
@@ -261,14 +259,14 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
 
     let output = command
         .output()
-        .map_err(|error| format!("No se pudo ejecutar {BUILD_CMD}: {error}"))?;
+        .map_err(|error| format!("Failed to execute {BUILD_CMD}: {error}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.trim().is_empty() {
             eprintln!("{stderr}");
         }
-        return Err(format!("{BUILD_CMD} falló ({})", output.status).into());
+        return Err(format!("{BUILD_CMD} failed ({})", output.status).into());
     }
 
     let [js, mut wasm, css] = read_pkg(&site.path().join(PKG_DIR))?;
@@ -299,16 +297,18 @@ fn normalize_wasm_split_marker(wasm: &mut [u8]) {
 }
 
 fn read_pkg(pkg: &Path) -> TaskResult<[Vec<u8>; 3]> {
-    let entries =
-        fs::read_dir(pkg).map_err(|error| format!("No se pudo leer pkg del informe: {error}"))?;
+    let entries = fs::read_dir(pkg)
+        .map_err(|error| format!("Failed to read report pkg directory: {error}"))?;
     let (mut js, mut wasm, mut css) = (None, None, None);
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        let name = name.to_str().ok_or("Nombre de artefacto no UTF-8 en pkg")?;
+        let name = name
+            .to_str()
+            .ok_or("Non-UTF-8 artifact filename in pkg directory")?;
         if !entry.file_type()?.is_file() || name.starts_with("__wasm_split") {
             return Err(
-                "El informe autónomo no admite snippets, WASM split ni otros recursos externos"
+                "Standalone report does not support snippets, WASM splits, or external resources"
                     .into(),
             );
         }
@@ -317,12 +317,13 @@ fn read_pkg(pkg: &Path) -> TaskResult<[Vec<u8>; 3]> {
             Some("wasm") => &mut wasm,
             Some("css") => &mut css,
             Some("ts") if name.ends_with(".d.ts") => continue,
-            _ => return Err(format!("Artefacto inesperado en pkg: {name:?}").into()),
+            _ => return Err(format!("Unexpected artifact in pkg directory: {name:?}").into()),
         };
         if slot.replace(entry.path()).is_some() {
-            return Err(
-                format!("Se requiere un solo JS, WASM y CSS en pkg; sobra {name:?}").into(),
-            );
+            return Err(format!(
+                "Expected a single JS, WASM, and CSS file in pkg; duplicate {name:?}"
+            )
+            .into());
         }
     }
     Ok([
@@ -334,14 +335,14 @@ fn read_pkg(pkg: &Path) -> TaskResult<[Vec<u8>; 3]> {
 
 fn read_asset(path: Option<PathBuf>, ext: &str) -> TaskResult<Vec<u8>> {
     let path =
-        path.ok_or_else(|| format!("cargo-leptos no generó el archivo .{ext} del informe"))?;
-    fs::read(path).map_err(|error| format!("No se pudo leer el .{ext} del informe: {error}").into())
+        path.ok_or_else(|| format!("cargo-leptos did not generate the report .{ext} file"))?;
+    fs::read(path).map_err(|error| format!("Failed to read report .{ext} file: {error}").into())
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> TaskResult {
     let parent = path
         .parent()
-        .ok_or("La ruta de destino debe tener directorio padre")?;
+        .ok_or("Destination path requires a parent directory")?;
     let mut staged = tempfile::Builder::new()
         .prefix(".asset-")
         .tempfile_in(parent)?;

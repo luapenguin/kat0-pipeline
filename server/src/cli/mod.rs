@@ -2,7 +2,7 @@
 
 use std::{ffi::OsString, path::Path};
 
-use kat0_pipeline::RunResult;
+use crate::RunResult;
 
 mod live;
 mod preview;

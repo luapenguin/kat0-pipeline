@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use kat0_pipeline::{
+use crate::{
     RunResult,
     bundle::Bundle,
     http::{LocalServer, file_routes},

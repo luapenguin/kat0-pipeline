@@ -44,14 +44,14 @@ pub async fn prepare(input: &Path, output_root: &Path) -> RunResult<ImportedRun>
 #[derive(Debug)]
 struct ImportError {
     path: PathBuf,
-    source: Box<dyn Error>,
+    source: Box<dyn Error + Send + Sync>,
 }
 
 impl fmt::Display for ImportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "No se pudo importar {}: {}",
+            "Failed to import {}: {}",
             self.path.display(),
             self.source
         )
@@ -117,12 +117,12 @@ async fn prepare_run(input: &Path, output_root: &Path) -> RunResult<ImportedRun>
         v2::SCHEMA_VERSION => {
             let snapshot = wire::decode(&bytes)?;
             if snapshot.status == Status::Running {
-                return Err("Para generar el informe se requiere una ejecución terminada".into());
+                return Err("Generating a report requires a finished run".into());
             }
             let failures = snapshot_failures(&snapshot);
             (snapshot, failures)
         }
-        version => return Err(format!("Versión de resultados no admitida: {version}").into()),
+        version => return Err(format!("Unsupported result schema version: {version}").into()),
     };
     Ok(ImportedRun {
         snapshot,
@@ -140,7 +140,7 @@ fn decode_v1(record: RecordedRun) -> RunResult<(Snapshot, Vec<Failure>)> {
         ..
     } = record;
     if !(1..=MAX_STEPS).contains(&steps.len()) {
-        return Err("El resultado requiere de 1 a 64 pasos".into());
+        return Err("Result requires between 1 and 64 steps".into());
     }
     validate_label(&job_id, &job_title)?;
 
@@ -195,7 +195,7 @@ fn decode_v1(record: RecordedRun) -> RunResult<(Snapshot, Vec<Failure>)> {
         definition_steps.push(Step { id, title });
     }
     if skipped && failures.is_empty() {
-        return Err("Un resultado sin fallos no puede tener pasos omitidos".into());
+        return Err("A passing result cannot contain skipped steps".into());
     }
 
     let definition = Definition {
@@ -213,22 +213,24 @@ fn decode_v1(record: RecordedRun) -> RunResult<(Snapshot, Vec<Failure>)> {
             }],
         }],
     };
-    let mut snapshot = Snapshot::new(definition)?;
     let status = Status::completed(failures.is_empty());
-    snapshot.status = status;
-    snapshot.elapsed_ms = elapsed_ms;
-    *snapshot.jobs_mut() = BTreeMap::from([(
-        job_id,
-        JobState {
-            row: Row {
-                status,
-                started_ms: Some(0),
-                duration_ms: Some(elapsed_ms),
+    let snapshot = Snapshot::from_parts(
+        definition,
+        status,
+        elapsed_ms,
+        BTreeMap::from([(
+            job_id,
+            JobState {
+                row: Row {
+                    status,
+                    started_ms: Some(0),
+                    duration_ms: Some(elapsed_ms),
+                },
+                steps: recorded_steps,
+                cases: BTreeMap::new(),
             },
-            steps: recorded_steps,
-            cases: BTreeMap::new(),
-        },
-    )]);
+        )]),
+    )?;
     Ok((snapshot, failures))
 }
 
@@ -243,9 +245,7 @@ fn timed_row(
         .checked_add(duration_ms)
         .filter(|&end| started_ms >= *previous_end && end <= elapsed_ms)
     else {
-        return Err(
-            "Los tiempos de los pasos están solapados, desordenados o fuera de la ejecución".into(),
-        );
+        return Err("Step timings overlap, are out of order, or exceed run duration".into());
     };
     *previous_end = end;
     Ok(Row {
@@ -262,7 +262,7 @@ fn external_failure(job: &str, step: Option<&str>, kind: FailureKind) -> Failure
             job: job.into(),
             step: step.map(str::to_owned),
         },
-        cause: "El productor externo registró este fallo".into(),
+        cause: "External producer recorded this failure".into(),
     }
 }
 
@@ -322,7 +322,7 @@ fn snapshot_failures(snapshot: &Snapshot) -> Vec<Failure> {
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: "La ejecución externa terminó con fallos".into(),
+            cause: "External run finished with failures".into(),
         });
     }
     failures

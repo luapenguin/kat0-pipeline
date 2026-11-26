@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use kat0_pipeline::{
+use crate::{
     RunResult,
     bundle::Bundle,
     import,
@@ -111,7 +111,7 @@ mod tests {
         .await
         .expect_err("execution and save failed");
         let display = error.to_string();
-        assert!(display.contains("Fallo de ejecución: job failed"));
-        assert!(display.contains("Fallo al guardar el informe: run-demo/index.html: write denied"));
+        assert!(display.contains("Execution failure: job failed"));
+        assert!(display.contains("Failed to save report: run-demo/index.html: write denied"));
     }
 }

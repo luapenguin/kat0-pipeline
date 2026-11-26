@@ -10,8 +10,9 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::{StatusCode, header},
+    extract::{Request, State},
+    http::{HeaderName, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -20,9 +21,12 @@ use tokio::{net::TcpListener, runtime::Handle, sync::watch, task::JoinHandle, ti
 
 use crate::{
     bundle::Bundle,
-    sse::{ClientPool, file_events, watch_events},
+    sse::{ClientPool, PublishedSnapshot, spawn_file_poller, watch_events},
     wire,
 };
+
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline' data: 'wasm-unsafe-eval'; style-src data: 'unsafe-inline'; connect-src 'self' data:; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 
 /// Cloneable signal triggered before Axum waits for open connections to drain.
 #[derive(Clone)]
@@ -57,10 +61,14 @@ impl LocalServer {
         let runtime = Handle::try_current().map_err(io::Error::other)?;
         let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
-        let origin = format!("http://{}", listener.local_addr()?);
+        let bound_host = listener.local_addr()?.to_string();
+        let origin = format!("http://{bound_host}");
         let listener = TcpListener::from_std(listener)?;
         let (shutdown, receiver) = watch::channel(false);
-        let app = build_router(ShutdownSignal(receiver.clone()));
+        let expected_host: Arc<str> = Arc::from(bound_host);
+        let app = build_router(ShutdownSignal(receiver.clone())).layer(
+            middleware::from_fn_with_state(expected_host, security_guard),
+        );
         let mut stopped = ShutdownSignal(receiver);
         let task = runtime.spawn(async move {
             axum::serve(listener, app)
@@ -90,17 +98,17 @@ impl LocalServer {
                 task.abort();
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "El servidor local no se cerró a tiempo",
+                    "Local server did not shut down in time",
                 ))
             }
         }
     }
 }
 
-/// Serves an in-memory live run backed by a `watch` channel with SSE (`/events`) and
-/// fallback `/snapshot`.
+/// Serves an in-memory live run backed by a `watch` channel of pre-serialized snapshots with
+/// SSE (`/events`) and fallback `/snapshot`.
 pub fn live_routes(
-    updates: watch::Receiver<Arc<Snapshot>>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
 ) -> Router {
@@ -118,22 +126,28 @@ pub fn live_routes(
 
 #[derive(Clone)]
 struct LiveState {
-    updates: watch::Receiver<Arc<Snapshot>>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
     clients: ClientPool,
 }
 
 async fn live_panel_page(State(state): State<LiveState>) -> impl IntoResponse {
-    let snapshot = state.updates.borrow().clone();
-    render_panel(&state.bundle, &snapshot)
+    let published = state.updates.borrow().clone();
+    let html = state
+        .bundle
+        .render_json(published.json(), !published.is_terminal());
+    ([(header::CACHE_CONTROL, "no-store")], Html(html))
 }
 
 async fn live_snapshot(State(state): State<LiveState>) -> impl IntoResponse {
-    let snapshot = state.updates.borrow().clone();
+    let published = state.updates.borrow().clone();
     (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(snapshot.as_ref().clone()),
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        published.json().to_owned(),
     )
 }
 
@@ -148,13 +162,17 @@ pub fn file_routes(
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
 ) -> Router {
+    let path: Arc<Path> = path.into();
+    let initial = Arc::new(initial);
+    let updates = spawn_file_poller(Arc::clone(&path), Arc::clone(&initial), shutdown.clone());
     Router::new()
         .route("/", get(file_panel_page))
         .route("/snapshot", get(file_snapshot))
         .route("/events", get(file_sse))
         .with_state(FileState {
-            path: path.into(),
-            initial: Arc::new(initial),
+            path,
+            initial,
+            updates,
             bundle,
             shutdown,
             clients: ClientPool::default(),
@@ -165,6 +183,7 @@ pub fn file_routes(
 struct FileState {
     path: Arc<Path>,
     initial: Arc<Snapshot>,
+    updates: watch::Receiver<PublishedSnapshot>,
     bundle: Arc<Bundle>,
     shutdown: ShutdownSignal,
     clients: ClientPool,
@@ -192,7 +211,7 @@ async fn file_snapshot(State(state): State<FileState>) -> impl IntoResponse {
 }
 
 async fn file_sse(State(state): State<FileState>) -> Response {
-    file_events(state.path, state.initial, state.shutdown, &state.clients)
+    watch_events(state.updates, state.shutdown, &state.clients)
 }
 
 fn render_panel(bundle: &Bundle, snapshot: &Snapshot) -> Response {
@@ -204,9 +223,60 @@ fn render_panel(bundle: &Bundle, snapshot: &Snapshot) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
+/// Enforces strict loopback `Host` matching (DNS rebinding protection), blocks cross-site
+/// browser reads on live endpoints, and attaches baseline security headers to every response.
+async fn security_guard(
+    State(expected_host): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let host_ok = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(&expected_host));
+    if !host_ok {
+        return apply_security_headers(StatusCode::MISDIRECTED_REQUEST.into_response());
+    }
+
+    let path = request.uri().path();
+    if matches!(path, "/events" | "/snapshot")
+        && let Some(fetch_site) = request
+            .headers()
+            .get(&SEC_FETCH_SITE)
+            .and_then(|value| value.to_str().ok())
+        && !matches!(fetch_site, "same-origin" | "none")
+    {
+        return apply_security_headers(StatusCode::FORBIDDEN.into_response());
+    }
+
+    apply_security_headers(next.run(request).await)
+}
+
+fn apply_security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    response
+}
+
 #[cfg(test)]
 mod tests {
-    use kat0_pipeline_protocol::model::{Column, Definition, Job, Row, Status};
+    use std::collections::BTreeMap;
+
+    use kat0_pipeline_protocol::model::{Column, Definition, Job, JobState, Row, Status};
     use serde_json::{Value, json};
     use tokio::{
         fs,
@@ -282,7 +352,7 @@ mod tests {
     }
 
     fn minimal_snapshot(status: Status, elapsed_ms: u64) -> Snapshot {
-        let mut snapshot = Snapshot::new(Definition {
+        let definition = Definition {
             title: "Live run".into(),
             description: "SSE test".into(),
             columns: vec![Column {
@@ -296,11 +366,8 @@ mod tests {
                     cases: vec![],
                 }],
             }],
-        })
-        .unwrap();
-        snapshot.status = status;
-        snapshot.elapsed_ms = elapsed_ms;
-        snapshot.jobs_mut().get_mut("check").unwrap().row = match status {
+        };
+        let row = match status {
             Status::Running => Row {
                 status: Status::Running,
                 started_ms: Some(0),
@@ -313,12 +380,29 @@ mod tests {
             },
             _ => Row::pending(),
         };
-        snapshot
+        Snapshot::from_parts(
+            definition,
+            status,
+            elapsed_ms,
+            BTreeMap::from([(
+                "check".into(),
+                JobState {
+                    row,
+                    steps: BTreeMap::new(),
+                    cases: BTreeMap::new(),
+                },
+            )]),
+        )
+        .unwrap()
+    }
+
+    fn published(status: Status, elapsed_ms: u64) -> PublishedSnapshot {
+        PublishedSnapshot::new(Arc::new(minimal_snapshot(status, elapsed_ms)))
     }
 
     #[tokio::test]
     async fn live_sse_streams_watch_updates_closes_on_terminal_and_serves_late_clients() {
-        let (tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (tx, rx) = watch::channel(published(Status::Running, 100));
         let bundle = Arc::new(Bundle::for_test());
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
 
@@ -338,13 +422,11 @@ mod tests {
         assert_eq!(first["status"], "running");
         assert_eq!(first["elapsed_ms"], 100);
 
-        tx.send(Arc::new(minimal_snapshot(Status::Running, 250)))
-            .unwrap();
+        tx.send(published(Status::Running, 250)).unwrap();
         let second = next_sse_json(&mut stream).await.unwrap();
         assert_eq!(second["elapsed_ms"], 250);
 
-        tx.send(Arc::new(minimal_snapshot(Status::Passed, 400)))
-            .unwrap();
+        tx.send(published(Status::Passed, 400)).unwrap();
         let terminal = next_sse_json(&mut stream).await.unwrap();
         assert_eq!(terminal["status"], "passed");
         assert_eq!(terminal["elapsed_ms"], 400);
@@ -370,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_sse_enforces_client_cap_and_closes_promptly_on_server_shutdown() {
-        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
         let bundle = Arc::new(Bundle::for_test());
         let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
 
@@ -419,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn watch_events_returns_204_once_shutdown_is_triggered() {
-        let (_tx, rx) = watch::channel(Arc::new(minimal_snapshot(Status::Running, 100)));
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
         let (stop_tx, stop_rx) = watch::channel(true);
         let _keep = stop_tx;
         let response = watch_events(rx, ShutdownSignal(stop_rx), &ClientPool::default());
@@ -599,5 +681,77 @@ mod tests {
             .unwrap();
         let response = client.await.unwrap();
         assert!(response.starts_with("HTTP/1.1 204"));
+    }
+
+    async fn raw_request(server: &LocalServer, raw_http: &str) -> String {
+        let address = server.origin().strip_prefix("http://").unwrap();
+        timeout(Duration::from_secs(5), async {
+            let mut client = TcpStream::connect(address).await?;
+            client.write_all(raw_http.as_bytes()).await?;
+            let mut response = String::new();
+            client.read_to_string(&mut response).await?;
+            Ok::<_, io::Error>(response)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enforces_security_headers_host_validation_and_fetch_metadata() {
+        let (_tx, rx) = watch::channel(published(Status::Running, 100));
+        let bundle = Arc::new(Bundle::for_test());
+        let server = LocalServer::start(move |shutdown| live_routes(rx, bundle, shutdown)).unwrap();
+        let host = server.origin().strip_prefix("http://").unwrap();
+
+        // Valid request carries full security header baseline.
+        let ok = request(&server, "/").await;
+        assert!(ok.starts_with("HTTP/1.1 200"));
+        let lower = ok.to_ascii_lowercase();
+        assert!(lower.contains("cache-control: no-store"));
+        assert!(lower.contains("x-content-type-options: nosniff"));
+        assert!(lower.contains("x-frame-options: deny"));
+        assert!(lower.contains("referrer-policy: no-referrer"));
+        assert!(lower.contains("content-security-policy: default-src 'none'"));
+
+        // Mismatched Host header (DNS rebinding) is rejected with 421.
+        let rebind = raw_request(
+            &server,
+            "GET / HTTP/1.1\r\nHost: evil.example:1234\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(rebind.starts_with("HTTP/1.1 421"));
+        assert!(
+            rebind
+                .to_ascii_lowercase()
+                .contains("x-frame-options: deny")
+        );
+
+        // Cross-site browser fetch to /snapshot or /events is rejected with 403.
+        for path in ["/snapshot", "/events"] {
+            let cross = raw_request(
+                &server,
+                &format!(
+                    "GET {path} HTTP/1.1\r\nHost: {host}\r\nSec-Fetch-Site: cross-site\r\nConnection: close\r\n\r\n"
+                ),
+            )
+            .await;
+            assert!(
+                cross.starts_with("HTTP/1.1 403"),
+                "expected 403 for cross-site {path}, got: {cross}"
+            );
+        }
+
+        // Same-origin fetch to /snapshot succeeds.
+        let same_origin = raw_request(
+            &server,
+            &format!(
+                "GET /snapshot HTTP/1.1\r\nHost: {host}\r\nSec-Fetch-Site: same-origin\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(same_origin.starts_with("HTTP/1.1 200"));
+
+        server.close().await.unwrap();
     }
 }

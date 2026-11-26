@@ -30,6 +30,31 @@ pub(crate) const MAX_CLIENTS: usize = 8;
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const FILE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Pre-serialized snapshot payload shared across live HTTP and SSE consumers so each
+/// snapshot transition is encoded to JSON once instead of once per connected client.
+#[derive(Clone)]
+pub struct PublishedSnapshot {
+    snapshot: Arc<Snapshot>,
+    json: Arc<str>,
+}
+
+impl PublishedSnapshot {
+    pub fn new(snapshot: Arc<Snapshot>) -> Self {
+        let json = serde_json::to_string(snapshot.as_ref())
+            .map(Arc::<str>::from)
+            .unwrap_or_else(|_| Arc::from("{}"));
+        Self { snapshot, json }
+    }
+
+    pub fn json(&self) -> &str {
+        self.json.as_ref()
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.snapshot.status.is_terminal()
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ClientPool(Arc<AtomicUsize>);
 
@@ -67,8 +92,8 @@ impl Drop for ClientGuard {
     }
 }
 
-fn event_for(snapshot: &Snapshot) -> Option<Event> {
-    Event::default().json_data(snapshot).ok()
+fn event_for(published: &PublishedSnapshot) -> Event {
+    Event::default().data(published.json())
 }
 
 fn no_store_sse<S>(stream: S) -> Response
@@ -83,14 +108,50 @@ where
     ([(header::CACHE_CONTROL, "no-store")], sse).into_response()
 }
 
-/// Streams snapshots from an in-memory `watch` channel.
+/// Spawns a single shared file-polling task backing all SSE subscribers of `serve <file>`.
+///
+/// Reads and validates the snapshot file at most once per `FILE_POLL_INTERVAL` regardless of
+/// subscriber count, publishing pre-serialized [`PublishedSnapshot`] updates over `watch`,
+/// and exits cleanly when `shutdown` triggers.
+pub(crate) fn spawn_file_poller(
+    path: Arc<Path>,
+    initial: Arc<Snapshot>,
+    mut shutdown: ShutdownSignal,
+) -> watch::Receiver<PublishedSnapshot> {
+    let (tx, rx) = watch::channel(PublishedSnapshot::new(Arc::clone(&initial)));
+    tokio::spawn(async move {
+        let mut last: Option<Snapshot> = None;
+        let mut ticker = time::interval(FILE_POLL_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.triggered() => break,
+                _ = ticker.tick() => {
+                    if let Ok(next) = wire::read(&path).await
+                        && next.definition() == initial.definition()
+                        && last.as_ref() != Some(&next)
+                    {
+                        last = Some(next.clone());
+                        if tx.send(PublishedSnapshot::new(Arc::new(next))).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Streams pre-serialized snapshots from a shared `watch` channel.
 ///
 /// - Returns `204 No Content` if shutdown has already started (stops EventSource reconnects).
 /// - Returns `503 Service Unavailable` if `MAX_CLIENTS` are already connected.
 /// - Emits the current snapshot immediately; closes right after delivering a terminal snapshot
 ///   or when `shutdown` triggers.
 pub(crate) fn watch_events(
-    mut updates: watch::Receiver<Arc<Snapshot>>,
+    mut updates: watch::Receiver<PublishedSnapshot>,
     shutdown: ShutdownSignal,
     clients: &ClientPool,
 ) -> Response {
@@ -117,103 +178,22 @@ pub(crate) fn watch_events(
             if done {
                 return None;
             }
-            if let Some(snapshot) = pending {
-                let terminal = snapshot.status.is_terminal();
-                let event = event_for(snapshot.as_ref())?;
+            if let Some(published) = pending {
+                let terminal = published.is_terminal();
+                let event = event_for(&published);
                 return Some((Ok(event), (None, updates, shutdown, guard, terminal)));
             }
-            loop {
-                tokio::select! {
-                    biased;
-                    () = shutdown.triggered() => return None,
-                    changed = updates.changed() => {
-                        if changed.is_err() {
-                            return None;
-                        }
-                        let snapshot = updates.borrow_and_update().clone();
-                        let terminal = snapshot.status.is_terminal();
-                        if let Some(event) = event_for(snapshot.as_ref()) {
-                            return Some((Ok(event), (None, updates, shutdown, guard, terminal)));
-                        }
+            tokio::select! {
+                biased;
+                () = shutdown.triggered() => None,
+                changed = updates.changed() => {
+                    if changed.is_err() {
+                        return None;
                     }
-                }
-            }
-        },
-    );
-    no_store_sse(stream)
-}
-
-/// Streams snapshots from a v2 snapshot file (`serve <file>`) while preserving the same
-/// SSE lifecycle contract (immediate first frame, terminal close, `204` on shutdown, client cap).
-pub(crate) fn file_events(
-    path: Arc<Path>,
-    initial: Arc<Snapshot>,
-    shutdown: ShutdownSignal,
-    clients: &ClientPool,
-) -> Response {
-    if shutdown.is_triggered() {
-        return (
-            [(header::CACHE_CONTROL, "no-store")],
-            StatusCode::NO_CONTENT,
-        )
-            .into_response();
-    }
-    let Some(guard) = clients.try_acquire() else {
-        return (
-            [(header::CACHE_CONTROL, "no-store")],
-            StatusCode::SERVICE_UNAVAILABLE,
-        )
-            .into_response();
-    };
-
-    let mut ticker = time::interval(FILE_POLL_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let stream = stream::unfold(
-        (
-            path,
-            initial,
-            None::<Snapshot>,
-            ticker,
-            shutdown,
-            guard,
-            false,
-        ),
-        |(path, initial, mut last, mut ticker, mut shutdown, guard, done)| async move {
-            if done {
-                return None;
-            }
-            if last.is_none() {
-                let first = match wire::read(&path).await {
-                    Ok(snapshot) if snapshot.definition() == initial.definition() => snapshot,
-                    _ => initial.as_ref().clone(),
-                };
-                let terminal = first.status.is_terminal();
-                let event = event_for(&first)?;
-                last = Some(first);
-                return Some((
-                    Ok(event),
-                    (path, initial, last, ticker, shutdown, guard, terminal),
-                ));
-            }
-            loop {
-                tokio::select! {
-                    biased;
-                    () = shutdown.triggered() => return None,
-                    _ = ticker.tick() => {
-                        if let Ok(next) = wire::read(&path).await
-                            && next.definition() == initial.definition()
-                            && last.as_ref() != Some(&next)
-                        {
-                            let terminal = next.status.is_terminal();
-                            if let Some(event) = event_for(&next) {
-                                last = Some(next);
-                                return Some((
-                                    Ok(event),
-                                    (path, initial, last, ticker, shutdown, guard, terminal),
-                                ));
-                            }
-                        }
-                    }
+                    let published = updates.borrow_and_update().clone();
+                    let terminal = published.is_terminal();
+                    let event = event_for(&published);
+                    Some((Ok(event), (None, updates, shutdown, guard, terminal)))
                 }
             }
         },

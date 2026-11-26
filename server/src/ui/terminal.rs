@@ -3,9 +3,12 @@
 use std::{
     collections::HashMap,
     env,
-    fs::File,
     io::{self, IsTerminal as _, Write},
     path::Path,
+};
+#[cfg(unix)]
+use std::{
+    fs::File,
     process::{Command, Stdio},
 };
 
@@ -57,10 +60,6 @@ impl TerminalPresenter<io::Stdout> {
 }
 
 impl<W: Write> TerminalPresenter<W> {
-    pub fn new(writer: W, is_tty: bool) -> Self {
-        Self::with_width(writer, is_tty, DEFAULT_TTY_WIDTH)
-    }
-
     pub fn with_width(writer: W, is_tty: bool, width: usize) -> Self {
         Self {
             writer,
@@ -373,6 +372,7 @@ fn detect_terminal_width() -> usize {
     {
         return cols;
     }
+    #[cfg(unix)]
     if let Ok(tty) = File::open("/dev/tty")
         && let Ok(output) = Command::new("stty")
             .arg("size")

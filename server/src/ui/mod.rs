@@ -20,7 +20,7 @@ impl UiMode {
             "browser" => Ok(Self::Browser),
             "both" => Ok(Self::Both),
             other => Err(format!(
-                "Modo --ui no válido: {other:?} (usa terminal, browser o both)"
+                "Invalid --ui mode: {other:?} (expected terminal, browser, or both)"
             )),
         }
     }

@@ -9,6 +9,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    limits::{
+        MAX_CASES_PER_JOB, MAX_COLUMNS, MAX_JOBS, MAX_STEPS_PER_CONTAINER, MAX_TOTAL_CASES,
+        MAX_TOTAL_STEPS,
+    },
+    v2::{WireError, validate_snapshot},
+};
+
 /// Execution status for a pipeline run, job, case, or step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,14 +148,21 @@ impl Definition {
             .sum()
     }
 
-    /// Validates stage structure, unique ASCII identifiers, and acyclic stage-ordered dependencies.
+    /// Validates stage structure, quotas, unique ASCII identifiers, and acyclic stage-ordered dependencies.
     pub fn validate(&self) -> Result<(), DefinitionError> {
         if self.columns.is_empty() || self.columns.iter().any(|column| column.jobs.is_empty()) {
             return Err(DefinitionError(
                 "Pipeline definition requires at least one column with jobs".into(),
             ));
         }
+        if self.columns.len() > MAX_COLUMNS {
+            return Err(DefinitionError(format!(
+                "Pipeline definition exceeds maximum of {MAX_COLUMNS} columns"
+            )));
+        }
         let mut job_columns = BTreeMap::new();
+        let mut total_cases = 0usize;
+        let mut total_steps = 0usize;
         for (index, column) in self.columns.iter().enumerate() {
             for job in &column.jobs {
                 if !valid_id(&job.id) || job_columns.insert(job.id.as_str(), index).is_some() {
@@ -156,7 +171,30 @@ impl Definition {
                         job.id
                     )));
                 }
+                if job_columns.len() > MAX_JOBS {
+                    return Err(DefinitionError(format!(
+                        "Pipeline definition exceeds maximum of {MAX_JOBS} jobs"
+                    )));
+                }
                 validate_step_ids(&job.id, &job.steps)?;
+                total_steps = total_steps.saturating_add(job.steps.len());
+                if total_steps > MAX_TOTAL_STEPS {
+                    return Err(DefinitionError(format!(
+                        "Pipeline definition exceeds maximum of {MAX_TOTAL_STEPS} total steps"
+                    )));
+                }
+                if job.cases.len() > MAX_CASES_PER_JOB {
+                    return Err(DefinitionError(format!(
+                        "Job {:?} exceeds maximum of {MAX_CASES_PER_JOB} cases",
+                        job.id
+                    )));
+                }
+                total_cases = total_cases.saturating_add(job.cases.len());
+                if total_cases > MAX_TOTAL_CASES {
+                    return Err(DefinitionError(format!(
+                        "Pipeline definition exceeds maximum of {MAX_TOTAL_CASES} total cases"
+                    )));
+                }
                 let mut case_ids = BTreeSet::new();
                 for case in &job.cases {
                     if !valid_id(&case.id) || !case_ids.insert(case.id.as_str()) {
@@ -166,6 +204,12 @@ impl Definition {
                         )));
                     }
                     validate_step_ids(&case.id, &case.steps)?;
+                    total_steps = total_steps.saturating_add(case.steps.len());
+                    if total_steps > MAX_TOTAL_STEPS {
+                        return Err(DefinitionError(format!(
+                            "Pipeline definition exceeds maximum of {MAX_TOTAL_STEPS} total steps"
+                        )));
+                    }
                 }
             }
         }
@@ -191,6 +235,11 @@ impl Definition {
 }
 
 fn validate_step_ids(owner: &str, steps: &[Step]) -> Result<(), DefinitionError> {
+    if steps.len() > MAX_STEPS_PER_CONTAINER {
+        return Err(DefinitionError(format!(
+            "Container {owner:?} exceeds maximum of {MAX_STEPS_PER_CONTAINER} steps"
+        )));
+    }
     let mut step_ids = BTreeSet::new();
     for step in steps {
         if !valid_id(&step.id) || !step_ids.insert(step.id.as_str()) {
@@ -340,6 +389,23 @@ impl Snapshot {
         })
     }
 
+    /// Constructs a validated [`Snapshot`] from its definition, status, clock, and recorded job states.
+    pub fn from_parts(
+        definition: Definition,
+        status: Status,
+        elapsed_ms: u64,
+        jobs: BTreeMap<String, JobState>,
+    ) -> Result<Self, WireError> {
+        let snapshot = Self {
+            definition,
+            status,
+            elapsed_ms,
+            jobs,
+        };
+        validate_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+
     /// Returns the immutable pipeline [`Definition`] embedded in this snapshot.
     pub fn definition(&self) -> &Definition {
         &self.definition
@@ -354,8 +420,7 @@ impl Snapshot {
         &self.jobs
     }
 
-    /// Returns a mutable reference to the recorded state map keyed by job ID.
-    pub fn jobs_mut(&mut self) -> &mut BTreeMap<String, JobState> {
+    pub(crate) fn jobs_mut(&mut self) -> &mut BTreeMap<String, JobState> {
         &mut self.jobs
     }
 
@@ -632,5 +697,198 @@ mod tests {
         let mut backward = definition();
         backward.columns[0].jobs[0].dependencies = vec!["unit-tests".into()];
         assert!(Snapshot::new(backward).is_err());
+    }
+
+    #[test]
+    fn enforces_structural_quotas_in_definition_validation() {
+        let single_job = |id: String| Job {
+            id,
+            title: "Job".into(),
+            is_test: true,
+            dependencies: vec![],
+            steps: vec![],
+            cases: vec![],
+        };
+
+        // Exceeding MAX_COLUMNS.
+        let too_many_columns = Definition {
+            title: "Columns".into(),
+            description: "Quota test".into(),
+            columns: (0..=MAX_COLUMNS)
+                .map(|i| Column {
+                    title: format!("Stage {i}"),
+                    jobs: vec![single_job(format!("job-{i}"))],
+                })
+                .collect(),
+        };
+        assert!(too_many_columns.validate().is_err());
+
+        // Exceeding MAX_JOBS.
+        let too_many_jobs = Definition {
+            title: "Jobs".into(),
+            description: "Quota test".into(),
+            columns: vec![Column {
+                title: "Stage".into(),
+                jobs: (0..=MAX_JOBS)
+                    .map(|i| single_job(format!("j-{i}")))
+                    .collect(),
+            }],
+        };
+        assert!(too_many_jobs.validate().is_err());
+
+        // Exceeding MAX_CASES_PER_JOB.
+        let too_many_cases_in_job = Definition {
+            title: "Cases".into(),
+            description: "Quota test".into(),
+            columns: vec![Column {
+                title: "Stage".into(),
+                jobs: vec![Job {
+                    id: "j0".into(),
+                    title: "Job 0".into(),
+                    is_test: true,
+                    dependencies: vec![],
+                    steps: vec![],
+                    cases: (0..=MAX_CASES_PER_JOB)
+                        .map(|i| Case {
+                            id: format!("c-{i}"),
+                            title: format!("Case {i}"),
+                            steps: vec![],
+                        })
+                        .collect(),
+                }],
+            }],
+        };
+        assert!(too_many_cases_in_job.validate().is_err());
+
+        // Exceeding MAX_STEPS_PER_CONTAINER.
+        let too_many_steps_in_job = Definition {
+            title: "Steps".into(),
+            description: "Quota test".into(),
+            columns: vec![Column {
+                title: "Stage".into(),
+                jobs: vec![Job {
+                    id: "j0".into(),
+                    title: "Job 0".into(),
+                    is_test: true,
+                    dependencies: vec![],
+                    steps: (0..=MAX_STEPS_PER_CONTAINER)
+                        .map(|i| Step {
+                            id: format!("s-{i}"),
+                            title: format!("Step {i}"),
+                        })
+                        .collect(),
+                    cases: vec![],
+                }],
+            }],
+        };
+        assert!(too_many_steps_in_job.validate().is_err());
+
+        // Exceeding MAX_TOTAL_CASES across multiple jobs (each within MAX_CASES_PER_JOB).
+        let jobs_needed = (MAX_TOTAL_CASES / MAX_CASES_PER_JOB) + 1;
+        let too_many_total_cases = Definition {
+            title: "Total cases".into(),
+            description: "Quota test".into(),
+            columns: vec![Column {
+                title: "Stage".into(),
+                jobs: (0..jobs_needed)
+                    .map(|j| Job {
+                        id: format!("j-{j}"),
+                        title: format!("Job {j}"),
+                        is_test: true,
+                        dependencies: vec![],
+                        steps: vec![],
+                        cases: (0..MAX_CASES_PER_JOB)
+                            .map(|c| Case {
+                                id: format!("c-{c}"),
+                                title: format!("Case {c}"),
+                                steps: vec![],
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }],
+        };
+        assert!(too_many_total_cases.validate().is_err());
+
+        // Exceeding MAX_TOTAL_STEPS across multiple jobs (each within MAX_STEPS_PER_CONTAINER).
+        let step_jobs = (MAX_TOTAL_STEPS / MAX_STEPS_PER_CONTAINER) + 1;
+        let too_many_total_steps = Definition {
+            title: "Total steps".into(),
+            description: "Quota test".into(),
+            columns: vec![Column {
+                title: "Stage".into(),
+                jobs: (0..step_jobs)
+                    .map(|j| Job {
+                        id: format!("j-{j}"),
+                        title: format!("Job {j}"),
+                        is_test: true,
+                        dependencies: vec![],
+                        steps: (0..MAX_STEPS_PER_CONTAINER)
+                            .map(|s| Step {
+                                id: format!("s-{s}"),
+                                title: format!("Step {s}"),
+                            })
+                            .collect(),
+                        cases: vec![],
+                    })
+                    .collect(),
+            }],
+        };
+        assert!(too_many_total_steps.validate().is_err());
+    }
+
+    #[test]
+    fn from_parts_accepts_valid_snapshots_and_rejects_broken_invariants() {
+        let def = definition();
+        let valid = Snapshot::from_parts(
+            def.clone(),
+            Status::Passed,
+            100,
+            BTreeMap::from([
+                (
+                    "compile".into(),
+                    JobState {
+                        row: Row {
+                            status: Status::Passed,
+                            started_ms: Some(0),
+                            duration_ms: Some(40),
+                        },
+                        steps: BTreeMap::from([(
+                            "check".into(),
+                            Row {
+                                status: Status::Passed,
+                                started_ms: Some(0),
+                                duration_ms: Some(40),
+                            },
+                        )]),
+                        cases: BTreeMap::new(),
+                    },
+                ),
+                (
+                    "unit-tests".into(),
+                    JobState {
+                        row: Row {
+                            status: Status::Passed,
+                            started_ms: Some(40),
+                            duration_ms: Some(60),
+                        },
+                        steps: BTreeMap::from([(
+                            "check".into(),
+                            Row {
+                                status: Status::Passed,
+                                started_ms: Some(40),
+                                duration_ms: Some(60),
+                            },
+                        )]),
+                        cases: BTreeMap::new(),
+                    },
+                ),
+            ]),
+        );
+        assert!(valid.is_ok());
+
+        // Missing job state must be rejected.
+        let missing_job = Snapshot::from_parts(def, Status::Passed, 100, BTreeMap::new());
+        assert!(missing_job.is_err());
     }
 }

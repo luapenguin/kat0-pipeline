@@ -33,3 +33,6 @@ web-sys = { version = "0.3", features = [
   "MessageEvent",
   "Window",
 ] }
+
+[lints]
+workspace = true

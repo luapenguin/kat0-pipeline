@@ -56,14 +56,9 @@ impl RunOptions {
     }
 }
 
-pub struct RunArtifacts {
-    pub snapshot_path: PathBuf,
-    pub html_path: Option<PathBuf>,
-}
-
-/// Orchestrates an external test command connected over a private `0700` Unix domain socket,
+/// Orchestrates an external test command connected over a private local IPC endpoint,
 /// streaming NDJSON v3 events into the selected UI presenter(s) and publishing final artifacts.
-pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
+pub async fn execute(options: RunOptions) -> RunResult {
     let mut bundle = match options.bundle {
         Some(prebuilt) => Some(prebuilt),
         None if options.ui.uses_browser() => Some(Arc::new(Bundle::embedded()?)),
@@ -83,7 +78,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         .spawn()
         .map_err(|error| {
             format!(
-                "No se pudo iniciar {}: {error}",
+                "Failed to start {}: {error}",
                 Path::new(&options.command).display()
             )
         })?;
@@ -135,12 +130,10 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         if let Some(browser) = browser {
             let _ = browser.close(Duration::ZERO).await;
         }
-        let detail = child_status.map_or_else(
-            || "sin estado de salida".to_owned(),
-            |status| status.to_string(),
-        );
+        let detail =
+            child_status.map_or_else(|| "no exit status".to_owned(), |status| status.to_string());
         return Err(format!(
-            "El productor terminó ({detail}) sin emitir run_started por {EVENTS_SOCK_ENV}"
+            "Producer exited ({detail}) without emitting run_started on {EVENTS_SOCK_ENV}"
         )
         .into());
     };
@@ -153,14 +146,40 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         }
     }
 
-    let html_target = reserve_report(&options.report_root).await?;
-    let snapshot_path = html_target
-        .parent()
-        .expect("reserved report path has a run directory")
-        .join("snapshot.json");
-    write_snapshot_atomic(&snapshot_path, state.snapshot()).await?;
-
     let mut failures = collect_failures(&state, child_status, interrupted);
+
+    let html_target = match reserve_report(&options.report_root).await {
+        Ok(path) => path,
+        Err(error) => {
+            if let Some(terminal) = &mut terminal {
+                terminal.on_finish(&state, None);
+            }
+            if let Some(browser) = browser {
+                let _ = browser.close(Duration::ZERO).await;
+            }
+            return Err(error.into());
+        }
+    };
+    let snapshot_path = match html_target.parent() {
+        Some(parent) => parent.join("snapshot.json"),
+        None => {
+            if let Some(terminal) = &mut terminal {
+                terminal.on_finish(&state, None);
+            }
+            if let Some(browser) = browser {
+                let _ = browser.close(Duration::ZERO).await;
+            }
+            return Err("Reserved report path is missing a parent directory".into());
+        }
+    };
+    if let Err(error) = write_snapshot_atomic(&snapshot_path, state.snapshot()).await {
+        failures.push(Failure {
+            kind: FailureKind::ReportWrite,
+            site: FailureSite::Report(snapshot_path.clone()),
+            cause: error,
+        });
+    }
+
     let mut published_html: Option<PathBuf> = None;
 
     let report_validation = if options.write_html {
@@ -178,7 +197,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
         }
         validation
             .result
-            .map_err(Box::<dyn std::error::Error>::from)
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
     } else if failures.is_empty() {
         Ok(())
     } else {
@@ -186,7 +205,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
             .drain(..)
             .map(|failure| failure.to_string())
             .collect::<Vec<_>>()
-            .join("\nAdemás: ");
+            .join("\nAlso: ");
         Err(combined.into())
     };
 
@@ -201,10 +220,7 @@ pub async fn execute(options: RunOptions) -> RunResult<RunArtifacts> {
     }
 
     report_validation?;
-    Ok(RunArtifacts {
-        snapshot_path,
-        html_path: published_html,
-    })
+    Ok(())
 }
 
 struct RunSession {
@@ -291,13 +307,13 @@ fn collect_failures(
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: "Ejecución interrumpida por señal del usuario".into(),
+            cause: "Execution interrupted by user signal".into(),
         });
     } else if state.snapshot().status == Status::Failed && failures.is_empty() {
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: "La ejecución terminó con fallos".into(),
+            cause: "Execution finished with failures".into(),
         });
     }
 
@@ -308,7 +324,7 @@ fn collect_failures(
         failures.push(Failure {
             kind: FailureKind::Execution,
             site: FailureSite::Run,
-            cause: format!("El productor devolvió código de salida no exitoso ({status})").into(),
+            cause: format!("Producer exited with non-zero status ({status})").into(),
         });
     }
     failures
@@ -333,7 +349,7 @@ fn map_recorded_failure(entry: &RecordedFailure) -> Failure {
             job: entry.job_id.clone(),
             step,
         },
-        cause: "El productor registró este fallo".into(),
+        cause: "Producer recorded this failure".into(),
     }
 }
 
@@ -343,7 +359,7 @@ async fn write_snapshot_atomic(path: &Path, snapshot: &Snapshot) -> RunResult {
     tokio::task::spawn_blocking(move || -> io::Result<()> {
         let parent = path
             .parent()
-            .ok_or_else(|| io::Error::other("El snapshot requiere un directorio"))?;
+            .ok_or_else(|| io::Error::other("Snapshot path requires a parent directory"))?;
         std::fs::create_dir_all(parent)?;
         let mut staged = tempfile::Builder::new()
             .prefix(".snapshot-")
@@ -368,6 +384,11 @@ mod tests {
 
     const FIXTURE_V3: &str = include_str!("../fixtures/web_regression_v3.ndjson");
 
+    #[cfg(windows)]
+    const PYTHON_BIN: &str = "python";
+    #[cfg(not(windows))]
+    const PYTHON_BIN: &str = "python3";
+
     fn python_sender_script(lines: &[&str], exit_code: i32, emit_stdout_noise: bool) -> String {
         let payload = serde_json::to_string(lines).unwrap();
         let noise = if emit_stdout_noise {
@@ -377,13 +398,29 @@ mod tests {
             ""
         };
         format!(
-            "import json, os, socket, sys\n\
+            "import json, os, socket, sys, time\n\
              {noise}\
-             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n\
-             sock.connect(os.environ['{EVENTS_SOCK_ENV}'])\n\
-             for line in json.loads({payload:?}):\n    \
-             sock.sendall((line + '\\n').encode('utf-8'))\n\
-             sock.close()\n\
+             endpoint = os.environ['{EVENTS_SOCK_ENV}']\n\
+             lines = json.loads({payload:?})\n\
+             if os.name == 'nt':\n    \
+                 deadline = time.monotonic() + 5.0\n    \
+                 while True:\n        \
+                     try:\n            \
+                         pipe = open(endpoint, 'wb', buffering=0)\n            \
+                         break\n        \
+                     except OSError:\n            \
+                         if time.monotonic() >= deadline:\n                \
+                             raise\n            \
+                         time.sleep(0.01)\n    \
+                 with pipe:\n        \
+                     for line in lines:\n            \
+                         pipe.write((line + '\\n').encode('utf-8'))\n\
+             else:\n    \
+                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n    \
+                 sock.connect(endpoint)\n    \
+                 for line in lines:\n        \
+                     sock.sendall((line + '\\n').encode('utf-8'))\n    \
+                 sock.close()\n\
              sys.exit({exit_code})\n"
         )
     }
@@ -401,7 +438,7 @@ mod tests {
         ];
         let script = python_sender_script(&lines, 0, true);
         let mut options = RunOptions::new(
-            "python3".into(),
+            PYTHON_BIN.into(),
             vec!["-c".into(), script.into()],
             root.path().to_owned(),
         );
@@ -409,9 +446,11 @@ mod tests {
         options.write_html = false;
         options.open_browser = false;
 
-        let artifacts = execute(options).await.unwrap();
-        assert!(artifacts.html_path.is_none());
-        let snapshot = decode(&fs::read(&artifacts.snapshot_path).await.unwrap()).unwrap();
+        execute(options).await.unwrap();
+        let mut entries = fs::read_dir(root.path()).await.unwrap();
+        let run_dir = entries.next_entry().await.unwrap().unwrap().path();
+        assert!(!run_dir.join("index.html").exists());
+        let snapshot = decode(&fs::read(run_dir.join("snapshot.json")).await.unwrap()).unwrap();
         assert_eq!(snapshot.status, Status::Passed);
         assert_eq!(snapshot.elapsed_ms, 80);
     }
@@ -427,7 +466,7 @@ mod tests {
         lines.insert(3, "{not-valid-json");
         let script = python_sender_script(&lines, 1, true);
         let mut options = RunOptions::new(
-            "python3".into(),
+            PYTHON_BIN.into(),
             vec!["-c".into(), script.into()],
             root.path().to_owned(),
         );
@@ -439,10 +478,9 @@ mod tests {
 
         let error = execute(options)
             .await
-            .err()
-            .expect("failed fixture must return error");
+            .expect_err("failed fixture must return error");
         let display = error.to_string();
-        assert!(display.contains("Aserción fallida"));
+        assert!(display.contains("Assertion failed"));
         assert!(display.contains("errors-recovery"));
         assert!(display.contains("dns-races/retry-write"));
 
@@ -464,7 +502,7 @@ mod tests {
         ];
         let script = python_sender_script(&lines, 2, false);
         let mut options = RunOptions::new(
-            "python3".into(),
+            PYTHON_BIN.into(),
             vec!["-c".into(), script.into()],
             root.path().to_owned(),
         );
@@ -488,5 +526,36 @@ mod tests {
             snapshot.row("job-1", Some("s2")).map(|row| row.status),
             Some(Status::Skipped)
         );
+    }
+
+    #[tokio::test]
+    async fn closes_browser_cleanly_when_report_root_cannot_be_reserved() {
+        let scratch = tempfile::tempdir().unwrap();
+        let blocked_root = scratch.path().join("not-a-dir");
+        fs::write(&blocked_root, b"existing file").await.unwrap();
+        let lines = [
+            r#"{"type":"run_started","schema_version":3,"workers":1,"definition":{"title":"Pass","description":"Blocked report root","columns":[{"title":"Verify","jobs":[{"id":"job-1","title":"Check","is_test":true,"dependencies":[],"steps":[]}]}]}}"#,
+            r#"{"type":"job_started","job_id":"job-1","at_ms":0}"#,
+            r#"{"type":"job_finished","job_id":"job-1","status":"passed","at_ms":10}"#,
+            r#"{"type":"run_finished","status":"passed","elapsed_ms":10}"#,
+        ];
+        let script = python_sender_script(&lines, 0, false);
+        let mut options = RunOptions::new(
+            PYTHON_BIN.into(),
+            vec!["-c".into(), script.into()],
+            blocked_root.clone(),
+        );
+        options.ui = UiMode::Browser;
+        options.write_html = true;
+        options.open_browser = false;
+        options.browser_grace = Duration::from_secs(5);
+        options.bundle = Some(Arc::new(Bundle::for_test()));
+
+        // Should fail promptly (closing browser with Duration::ZERO instead of waiting 5s grace).
+        let result = tokio::time::timeout(Duration::from_secs(3), execute(options))
+            .await
+            .expect("must close browser promptly on reserve failure");
+        assert!(result.is_err());
+        assert_eq!(fs::read(&blocked_root).await.unwrap(), b"existing file");
     }
 }
