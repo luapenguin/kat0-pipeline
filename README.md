@@ -2,7 +2,7 @@
 
 Live terminal and browser pipeline runner, NDJSON v3 event protocol, and standalone offline HTML report generator in Rust.
 
-![Kat0 Web Regression — live and offline pipeline viewer](docs/demo-panel.jpg)
+![Kat0 Web Regression — live and offline pipeline viewer](docs/demo-panel.png)
 
 ## Workspace layout
 
