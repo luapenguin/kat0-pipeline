@@ -123,11 +123,24 @@ pub fn verify(rebuild: bool) -> TaskResult {
         let rebuilt = build_frontend(&root)?;
         let expected = rebuilt.manifest();
         if manifest != expected {
-            return Err(
+            let mut details = String::new();
+            for (staged, actual) in manifest.assets.iter().zip(&expected.assets) {
+                if staged != actual {
+                    details.push_str(&format!(
+                        "\n  {}: manifest={} bytes ({}), actual={} bytes ({})",
+                        staged.file,
+                        staged.bytes,
+                        &staged.sha256[..12],
+                        actual.bytes,
+                        &actual.sha256[..12],
+                    ));
+                }
+            }
+            return Err(format!(
                 "Los assets en server/assets/ no coinciden con la compilación actual de client/. \
-                 Ejecuta `cargo run -p xtask -- build-panel`."
-                    .into(),
-            );
+                 Ejecuta `cargo run -p xtask -- build-panel`.{details}"
+            )
+            .into());
         }
         println!(
             "Verified reproducible panel assets ({} bytes total).",
@@ -345,6 +358,11 @@ fn reproducible_rustflags(workspace_root: &Path) -> String {
     {
         remaps.push((rustup_home, "/rustup"));
     }
+    // Remap the active rustc sysroot last (rustc prefers the last matching prefix) so toolchain
+    // channel names (`stable-...` vs `1.100.0-...`) do not leak into the compiled WASM.
+    if let Some(sysroot) = rustc_sysroot() {
+        remaps.push((sysroot, "/sysroot"));
+    }
 
     for (from, to) in remaps {
         let canonical = absolute(&from).unwrap_or(from);
@@ -353,6 +371,21 @@ fn reproducible_rustflags(workspace_root: &Path) -> String {
         }
     }
     flags.join("\x1f")
+}
+
+fn rustc_sysroot() -> Option<PathBuf> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let trimmed = path.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
 fn server_assets_dir(workspace_root: &Path) -> PathBuf {
