@@ -4,7 +4,7 @@ Live terminal and browser pipeline runner, NDJSON v3 event protocol, and standal
 
 ## Workspace layout
 
-This workspace contains six crates sharing a single `Cargo.lock` and producing a single CLI binary (`kat0-pipeline`):
+This workspace contains seven crates sharing a single `Cargo.lock` and producing a single CLI binary (`kat0-pipeline`):
 
 - [`protocol`](protocol/src/lib.rs) (`kat0-pipeline-protocol`): pure `serde` library with zero I/O or async runtime dependencies. Defines the hierarchical `Job -> Case -> Step` model (`Definition`, `Snapshot`, `Status`, `FailureKind`), `PipelineBuilder`, size limits, v2 snapshot codec, and NDJSON v3 event/reducer state machine.
 - [`reporter`](reporter/src/lib.rs) (`kat0-pipeline-reporter`): async producer library (Tokio + Unix socket IPC) with zero `axum`, `leptos`, or `playwright-rs` dependencies. Provides clonable `Send + Sync` `Reporter`, `TickGuard`, `TypedFailure`, `TaskFailure`, `SnapshotFile`, and execution combinators (`execute`).
@@ -12,8 +12,15 @@ This workspace contains six crates sharing a single `Cargo.lock` and producing a
 - [`server`](server/src/lib.rs) (`kat0-pipeline`): host-only CLI binary with embedded WASM/JS/CSS panel assets (no `leptos` or `playwright-rs` dependency, no runtime Cargo/WASM build required).
 - [`client`](client/src/lib.rs) (`kat0-pipeline-client`, `publish = false`): Leptos CSR WASM panel rendering live SSE (`/events`, `/snapshot` resync) and standalone offline reports.
 - [`xtask`](xtask/src/main.rs) (`publish = false`): reproducible build and SHA-256 verification of the embedded panel assets under [`server/assets/`](server/assets/).
+- [`e2e`](e2e/README.md) (`kat0-pipeline-e2e`, `publish = false`): Firefox browser verification suite for the offline report, live SSE viewer, and orchestrated `run` command.
+
+See also: [Wire Protocol Specification](docs/PROTOCOL.md), [Changelog](CHANGELOG.md), and [Security Policy](SECURITY.md).
 
 ## Installing the CLI
+
+Prebuilt binaries for Linux (`x86_64`, `aarch64`), macOS (`aarch64`, `x86_64`), and Windows (`x86_64`) are published on [GitHub Releases](https://github.com/luapenguin/kat0-pipeline/releases) alongside `SHA256SUMS.txt` and `LICENSE`.
+
+From source:
 
 ```sh
 cargo install --path server --locked
@@ -21,7 +28,7 @@ kat0-pipeline --version
 kat0-pipeline --help
 ```
 
-*(Once published to `crates.io`: `cargo install kat0-pipeline --locked`.)*
+*(Once published to `crates.io`: `cargo install kat0-pipeline --locked` or `cargo binstall kat0-pipeline`.)*
 
 ## Usage
 
@@ -79,12 +86,14 @@ cargo run --locked -p xtask -- verify-panel
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask --all-targets -- -D warnings
+cargo clippy --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask -p kat0-pipeline-e2e --all-targets -- -D warnings
 cargo clippy --locked -p kat0-pipeline-client --lib --target wasm32-unknown-unknown -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright --no-deps
-cargo test --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask
+cargo test --locked -p kat0-pipeline-protocol -p kat0-pipeline-reporter -p kat0-pipeline-playwright -p kat0-pipeline -p xtask -p kat0-pipeline-e2e
 cargo run --locked -p xtask -- verify-panel
 ```
+
+For the full Playwright Firefox E2E suite, see [`e2e/README.md`](e2e/README.md).
 
 ## License
 

@@ -2,7 +2,7 @@
   "schema_version": 2,
   "snapshot": {
     "definition": {
-      "title": "Web regression",
+      "title": "Kat0 Web Regression",
       "description": "Simulated snapshot. No jobs ran. Cleanup waits for navigation evidence and runs even if a test fails. The report includes test and cleanup outcomes.",
       "columns": [
         {

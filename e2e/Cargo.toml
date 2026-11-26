@@ -1,0 +1,21 @@
+[package]
+name = "kat0-pipeline-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+kat0-pipeline-playwright.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "time",
+] }

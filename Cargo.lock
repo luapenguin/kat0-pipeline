@@ -1162,6 +1162,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kat0-pipeline-e2e"
+version = "0.1.0"
+dependencies = [
+ "kat0-pipeline-playwright",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "kat0-pipeline-playwright"
 version = "0.1.0"
 dependencies = [

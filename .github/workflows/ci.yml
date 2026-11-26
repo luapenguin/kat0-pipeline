@@ -1,0 +1,222 @@
+name: CI (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_msrv:
+        description: "Verify MSRV (Rust 1.88) on publishable crates"
+        type: boolean
+        default: true
+      run_package_check:
+        description: "Verify cargo package (<10 MiB) and clean cargo install without WASM/cargo-leptos"
+        type: boolean
+        default: true
+      run_panel_rebuild:
+        description: "Rebuild WASM panel with cargo-leptos and verify byte-for-byte reproducibility"
+        type: boolean
+        default: false
+      run_e2e_firefox:
+        description: "Run Playwright Firefox E2E suite against the built kat0-pipeline CLI"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-manual-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-unit:
+    name: Lint, docs, and tests
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (host crates)
+        run: >
+          cargo clippy --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+          -p xtask
+          -p kat0-pipeline-e2e
+          --all-targets -- -D warnings
+
+      - name: Clippy (WASM client)
+        run: >
+          cargo clippy --locked
+          -p kat0-pipeline-client
+          --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: >
+          cargo doc --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          --no-deps
+
+      - name: Tests
+        run: >
+          cargo test --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+          -p xtask
+          -p kat0-pipeline-e2e
+
+      - name: Verify embedded panel manifest
+        run: cargo run --locked -p xtask -- verify-panel --manifest-only
+
+  msrv:
+    name: MSRV (Rust 1.88)
+    if: inputs.run_msrv
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.88
+
+      - name: Check and test publishable crates on MSRV
+        run: >
+          cargo test --locked
+          -p kat0-pipeline-protocol
+          -p kat0-pipeline-reporter
+          -p kat0-pipeline-playwright
+          -p kat0-pipeline
+
+  package-and-install:
+    name: Package and clean cargo install
+    if: inputs.run_package_check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-install
+
+      - name: Verify crate packaging and size (< 10 MiB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_bytes=$((10 * 1024 * 1024))
+          for pkg in kat0-pipeline-protocol kat0-pipeline-reporter kat0-pipeline-playwright kat0-pipeline; do
+            files="$(cargo package --list --locked -p "${pkg}")"
+            grep -qx 'LICENSE' <<< "${files}" || { echo "${pkg} is missing LICENSE"; exit 1; }
+            grep -qx 'README.md' <<< "${files}" || { echo "${pkg} is missing README.md"; exit 1; }
+          done
+          cargo package --locked --no-verify -p kat0-pipeline-protocol
+          cargo package --locked --no-verify -p kat0-pipeline-reporter
+          cargo package --locked --no-verify -p kat0-pipeline-playwright
+          cargo package --locked --no-verify -p kat0-pipeline
+          for crate in target/package/*.crate; do
+            size="$(stat -c%s "${crate}")"
+            echo "${crate}: ${size} bytes"
+            if (( size >= max_bytes )); then
+              echo "${crate} exceeds crates.io 10 MiB limit" >&2
+              exit 1
+            fi
+          done
+
+      - name: Clean cargo install without wasm32 or cargo-leptos
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="${RUNNER_TEMP}/kat0-install"
+          cargo install --path server --locked --root "${install_root}"
+          out_dir="$(mktemp -d)"
+          (
+            cd /tmp
+            "${install_root}/bin/kat0-pipeline" --version
+            PIPELINE_REPORT_ROOT="${out_dir}" PIPELINE_NO_OPEN=1 "${install_root}/bin/kat0-pipeline" sample
+          )
+          find "${out_dir}" -name 'index.html' | grep -q 'index.html'
+
+  assets-reproducibility:
+    name: Panel assets reproducibility
+    if: inputs.run_panel_rebuild
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: panel-rebuild
+
+      - name: Install cargo-leptos 0.3.12
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos@0.3.12
+
+      - name: Verify reproducible embedded panel assets
+        run: cargo run --locked -p xtask -- verify-panel
+
+  e2e-firefox:
+    name: E2E viewer (Playwright Firefox)
+    if: inputs.run_e2e_firefox
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_DRIVER_CACHE_DIR: ${{ github.workspace }}/.playwright-driver
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-firefox
+
+      - name: Cache Playwright driver
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.playwright-driver
+          key: ${{ runner.os }}-playwright-driver-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Playwright Firefox browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-firefox-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build kat0-pipeline binary
+        run: cargo build --locked -p kat0-pipeline --bin kat0-pipeline
+
+      - name: Install Playwright Firefox matching Cargo.lock
+        run: cargo run --locked -p kat0-pipeline-e2e --example install-browsers -- firefox --with-deps
+
+      - name: Run pipeline_viewer Firefox E2E suite
+        run: cargo test --locked -p kat0-pipeline-e2e --test pipeline_viewer -- --ignored
