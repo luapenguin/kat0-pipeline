@@ -5,14 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/kat0-pipeline-playwright"
 readme.workspace = true
 description = "playwright-rs error classification and browser lifecycle adapter for kat0-pipeline-reporter"
 keywords = ["playwright", "pipeline", "testing", "e2e", "browser"]
 categories = ["development-tools::testing", "web-programming"]
-include = ["Cargo.toml", "LICENSE", "src/**"]
+include = ["Cargo.toml", "LICENSE", "src/**", "examples/**"]
 
 [dependencies]
 kat0-pipeline-reporter.workspace = true
 playwright-rs = { version = "0.21", default-features = false, features = [
   "ring",
 ] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

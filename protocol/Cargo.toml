@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/kat0-pipeline-protocol"
 readme.workspace = true
 description = "I/O-free pipeline graph model, v2 snapshot codec, and NDJSON v3 event reducer for kat0-pipeline"
 keywords = ["pipeline", "testing", "ndjson", "protocol", "e2e"]
