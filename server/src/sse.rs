@@ -120,7 +120,7 @@ pub(crate) fn spawn_file_poller(
 ) -> watch::Receiver<PublishedSnapshot> {
     let (tx, rx) = watch::channel(PublishedSnapshot::new(Arc::clone(&initial)));
     tokio::spawn(async move {
-        let mut last: Option<Snapshot> = None;
+        let mut last = initial.as_ref().clone();
         let mut ticker = time::interval(FILE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -130,9 +130,9 @@ pub(crate) fn spawn_file_poller(
                 _ = ticker.tick() => {
                     if let Ok(next) = wire::read(&path).await
                         && next.definition() == initial.definition()
-                        && last.as_ref() != Some(&next)
+                        && last != next
                     {
-                        last = Some(next.clone());
+                        last = next.clone();
                         if tx.send(PublishedSnapshot::new(Arc::new(next))).is_err() {
                             break;
                         }
