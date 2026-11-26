@@ -250,6 +250,9 @@ fn build_frontend(root: &Path) -> TaskResult<BuiltAssets> {
         .env("LEPTOS_SITE_PKG_DIR", PKG_DIR)
         .env("LEPTOS_OUTPUT_NAME", OUTPUT_NAME)
         .env("LEPTOS_HASH_FILES", "false")
+        .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+        .env("CARGO_PROFILE_RELEASE_LTO", "true")
+        .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "z")
         .env("CARGO_ENCODED_RUSTFLAGS", reproducible_rustflags(root))
         .env_remove("RUSTFLAGS")
         .stdin(Stdio::null())
@@ -344,24 +347,27 @@ fn reproducible_rustflags(workspace_root: &Path) -> String {
             .collect(),
     };
 
-    let mut remaps = vec![(workspace_root.to_path_buf(), "/workspace")];
+    let mut remaps = vec![(workspace_root.to_path_buf(), "/workspace".to_owned())];
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if let Some(cargo_home) = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|dir| dir.join(".cargo")))
     {
-        remaps.push((cargo_home, "/cargo"));
+        remaps.push((cargo_home, "/cargo".to_owned()));
     }
     if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|dir| dir.join(".rustup")))
     {
-        remaps.push((rustup_home, "/rustup"));
+        remaps.push((rustup_home, "/rustup".to_owned()));
     }
-    // Remap the active rustc sysroot last (rustc prefers the last matching prefix) so toolchain
-    // channel names (`stable-...` vs `1.100.0-...`) do not leak into the compiled WASM.
-    if let Some(sysroot) = rustc_sysroot() {
-        remaps.push((sysroot, "/sysroot"));
+    // Normalize local `rust-src` paths back to `/rustc/<commit-hash>/library` so machines with
+    // `rust-src` installed produce the exact same WASM bytes as minimal CI runners without it.
+    if let (Some(sysroot), Some(commit)) = (rustc_sysroot(), rustc_commit_hash()) {
+        remaps.push((
+            sysroot.join("lib/rustlib/src/rust/library"),
+            format!("/rustc/{commit}/library"),
+        ));
     }
 
     for (from, to) in remaps {
@@ -386,6 +392,24 @@ fn rustc_sysroot() -> Option<PathBuf> {
     let path = String::from_utf8(output.stdout).ok()?;
     let trimmed = path.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+fn rustc_commit_hash() -> Option<String> {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash:"))
+        .map(|hash| hash.trim().to_owned())
+        .filter(|hash| !hash.is_empty())
 }
 
 fn server_assets_dir(workspace_root: &Path) -> PathBuf {
